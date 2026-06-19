@@ -1,0 +1,47 @@
+.market-tabs {
+  display: flex;
+  align-items: stretch;
+}
+
+.tab-btn {
+  min-width: 116px;
+  padding: 0 26px;
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: #a8b0b8;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    background 0.18s ease;
+}
+
+.tab-btn:hover {
+  color: #e0e6eb;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tab-btn.active {
+  color: #ff9800;
+}
+
+.tab-btn.active::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  bottom: -1px;
+  height: 3px;
+  background: #ff9800;
+}
+
+/* ===== 移动端适配 ===== */
+@media (max-width: 768px) {
+  .tab-btn {
+    min-width: 72px;
+    padding: 0 14px;
+    font-size: 14px;
+  }
+}

@@ -1,0 +1,40 @@
+:root {
+  --color-up: #ff4d43;
+  --color-up-soft: #d13f37;
+  --color-down: #4caf50;
+  --color-down-soft: #2f7f44;
+  --color-neutral: #8a949e;
+  --bg-primary: #05080a;
+  --text-primary: #dfe5e8;
+  --font-number: 'DIN Alternate', 'Roboto Mono', 'SFMono-Regular', Consolas, monospace;
+  font-family:
+    Inter,
+    'PingFang SC',
+    'Microsoft YaHei',
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100vh;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overflow: auto;
+}
+
+button {
+  font: inherit;
+}

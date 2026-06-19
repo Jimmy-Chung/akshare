@@ -1,0 +1,136 @@
+.app {
+  min-height: 100vh;
+  padding: 7px 7px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background:
+    radial-gradient(circle at 52% 0%, rgba(39, 63, 61, 0.18), transparent 34%),
+    linear-gradient(180deg, #080d0f 0%, #05080a 100%);
+  color: #d7dde2;
+}
+
+.top-section {
+  min-height: 98px;
+}
+
+.market-bar {
+  min-height: 45px;
+  display: flex;
+  justify-content: space-between;
+  align-items: stretch;
+  background: linear-gradient(180deg, rgba(17, 25, 29, 0.96), rgba(8, 13, 16, 0.98));
+  border: 1px solid #172228;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.refresh-area {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 0 15px;
+  color: #7f8991;
+  font-size: 13px;
+}
+
+.refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: #b7c0c8;
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  color: #f2f6f7;
+}
+
+.refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.refresh-icon {
+  width: 18px;
+  height: 18px;
+  color: currentColor;
+  filter: drop-shadow(0 0 5px rgba(184, 213, 219, 0.12));
+}
+
+.refresh-btn:disabled .refresh-icon {
+  animation: refresh-spin 1s linear infinite;
+}
+
+.last-update {
+  color: #7f8991;
+  white-space: nowrap;
+}
+
+.index-section {
+  padding: 0 9px;
+}
+
+.heatmap-wrapper {
+  flex: 1;
+  min-height: 510px;
+  padding: 0 9px;
+}
+
+@keyframes refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ===== 移动端 ===== */
+@media (max-width: 768px) {
+  .app {
+    padding: 0;
+    gap: 4px;
+  }
+
+  .top-section {
+    min-height: 0;
+  }
+
+  .market-bar {
+    min-height: 40px;
+    padding: 0 4px;
+    border-left: 0;
+    border-right: 0;
+    border-top: 0;
+  }
+
+  .refresh-area {
+    gap: 6px;
+    padding: 0 6px;
+  }
+
+  .refresh-btn {
+    font-size: 0;
+    gap: 0;
+  }
+
+  .refresh-icon {
+    width: 18px;
+    height: 18px;
+  }
+
+  .last-update {
+    font-size: 10px;
+  }
+
+  .index-section {
+    padding: 0 4px;
+  }
+
+  .heatmap-wrapper {
+    flex: 1 1 auto;
+    padding: 0 4px 4px;
+    min-height: 500px;
+  }
+}

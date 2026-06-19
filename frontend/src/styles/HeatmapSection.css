@@ -1,0 +1,559 @@
+.heatmap-section {
+  height: calc(100vh - 350px);
+  min-height: 330px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(420px, 0.9fr);
+  gap: 10px;
+}
+
+.heatmap-panel {
+  background: linear-gradient(180deg, rgba(15, 22, 25, 0.98), rgba(8, 13, 15, 0.98));
+  border: 1px solid #1a272e;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.heatmap-main {
+  min-width: 0;
+  padding: 12px 12px 11px;
+  display: flex;
+  flex-direction: column;
+}
+
+.heatmap-header {
+  height: 36px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+}
+
+.heatmap-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.heatmap-title-group h2,
+.detail-header h2 {
+  margin: 0;
+  color: #dfe5e8;
+  font-size: 19px;
+  line-height: 1;
+}
+
+.info-dot {
+  width: 17px;
+  height: 17px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #68737b;
+  border-radius: 50%;
+  color: #8f9aa2;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.area-mode {
+  padding-left: 12px;
+  border-left: 1px solid #26343b;
+  color: #9aa4ac;
+  font-size: 14px;
+}
+
+.sort-options {
+  display: inline-flex;
+  padding: 1px;
+  border: 1px solid #26343b;
+  background: #10181c;
+}
+
+.sort-btn {
+  min-width: 82px;
+  height: 31px;
+  border: 0;
+  background: transparent;
+  color: #9aa4ac;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.sort-btn + .sort-btn {
+  border-left: 1px solid #26343b;
+}
+
+.sort-btn:hover {
+  color: #e1e7eb;
+}
+
+.sort-btn.active {
+  color: #ff9800;
+  background: linear-gradient(180deg, rgba(255, 152, 0, 0.18), rgba(255, 152, 0, 0.06));
+}
+
+.heatmap-grid {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  margin-top: 8px;
+}
+
+.heat-tile {
+  position: absolute;
+  min-width: 0;
+  padding: 12px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(7, 10, 12, 0.9);
+  color: #f5f7f8;
+  text-align: center;
+  overflow: hidden;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    filter 0.16s ease,
+    transform 0.16s ease;
+}
+
+.heatmap-empty {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: #8a949e;
+  border: 1px dashed #26343b;
+}
+
+.heat-tile:hover {
+  filter: brightness(1.12);
+  z-index: 3;
+}
+
+.heat-tile.selected {
+  border-color: #f2f6f7 !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
+  z-index: 2;
+}
+
+.tile-name {
+  width: 100%;
+  font-size: 16px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.heat-tile strong {
+  font-family: var(--font-number);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.tile-flow {
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.heat-tile.area-xxl .tile-name {
+  font-size: 19px;
+}
+
+.heat-tile.area-xxl strong {
+  font-size: 26px;
+}
+
+.heat-tile.area-xl .tile-name,
+.heat-tile.area-lg .tile-name {
+  font-size: 17px;
+}
+
+.heat-tile.area-xl strong,
+.heat-tile.area-lg strong {
+  font-size: 22px;
+}
+
+.heat-tile.area-md .tile-name {
+  font-size: 14px;
+}
+
+.heat-tile.area-md strong {
+  font-size: 16px;
+}
+
+.heat-tile.area-sm {
+  padding: 8px 5px;
+}
+
+.heat-tile.area-sm .tile-name {
+  font-size: 12px;
+}
+
+.heat-tile.area-sm strong {
+  font-size: 13px;
+}
+
+.heat-tile.area-sm .tile-flow,
+.heat-tile.area-md .tile-flow {
+  display: none;
+}
+
+.more-tile {
+  display: grid;
+  place-items: center;
+  background: #151d22;
+  border-color: #26343b;
+  color: #c9d0d6;
+  font-size: 24px;
+  font-weight: 800;
+  cursor: default;
+}
+
+.heatmap-scale {
+  height: 36px;
+  display: grid;
+  grid-template-columns: 44px 1fr 44px;
+  align-items: center;
+  gap: 12px;
+  color: #b2bbc2;
+  font-family: var(--font-number);
+  font-size: 15px;
+}
+
+.scale-gradient {
+  height: 7px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #327344 0%, #7f8a89 50%, #c9433c 100%);
+}
+
+.heatmap-note {
+  padding-top: 7px;
+  border-top: 1px solid #18252b;
+  color: #69747c;
+  font-size: 12px;
+}
+
+.detail-panel {
+  min-width: 0;
+  padding: 19px 17px 13px;
+  display: flex;
+  flex-direction: column;
+}
+
+.detail-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #1c2a31;
+}
+
+.detail-header h2 {
+  margin-bottom: 9px;
+}
+
+.detail-header strong {
+  display: block;
+  font-family: var(--font-number);
+  font-size: 23px;
+}
+
+.detail-close {
+  color: #9ba5ad;
+  font-size: 30px;
+  line-height: 1;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.detail-close:hover {
+  color: #e0e6eb;
+}
+
+.detail-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, max-content);
+  gap: 28px;
+  padding: 12px 0;
+  border-bottom: 1px solid #1c2a31;
+  color: #9fa9b1;
+  font-size: 13px;
+}
+
+.stock-detail-metrics {
+  grid-template-columns: repeat(5, max-content);
+  gap: 22px;
+}
+
+.leader-title {
+  padding: 11px 0 10px;
+  color: #d3dae0;
+  font-size: 15px;
+}
+
+.stock-table {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #1b282f;
+}
+
+.stock-row {
+  min-height: 41px;
+  display: grid;
+  grid-template-columns: 1.45fr 0.65fr 0.65fr 0.8fr 0.75fr;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-bottom: 1px solid #18252b;
+  color: #c2cad0;
+  font-family: var(--font-number);
+  font-size: 14px;
+}
+
+.stock-row:nth-child(2n + 1):not(.table-head) {
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.stock-row.table-head {
+  min-height: 35px;
+  color: #7e8991;
+  font-family: inherit;
+}
+
+.stock-name-cell {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: inherit;
+}
+
+.stock-name-cell b {
+  width: 17px;
+  height: 17px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 3px;
+  background: #596269;
+  color: #f3f5f6;
+  font-size: 11px;
+}
+
+.stock-row:nth-child(2) .stock-name-cell b,
+.stock-row:nth-child(3) .stock-name-cell b,
+.stock-row:nth-child(4) .stock-name-cell b {
+  background: linear-gradient(180deg, #d99b45, #a66e2f);
+}
+
+.stock-name-cell span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stock-name-cell small {
+  display: block;
+  margin-top: 2px;
+  color: #77828a;
+  font-family: var(--font-number);
+  font-size: 11px;
+}
+
+.empty-table,
+.panel-empty {
+  padding: 28px;
+  color: #8a949e;
+  text-align: center;
+}
+
+.detail-foot {
+  margin-top: auto;
+  padding-top: 12px;
+  color: #6e7981;
+  font-size: 12px;
+}
+
+/* ===== 移动端 ===== */
+@media (max-width: 768px) {
+  .heatmap-section {
+    height: auto;
+    min-height: 500px;
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .heatmap-main {
+    min-height: 500px;
+    padding: 8px 6px 8px;
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+  }
+
+  .heatmap-header {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 2px;
+  }
+
+  .heatmap-title-group h2 {
+    font-size: 15px;
+  }
+
+  .area-mode {
+    font-size: 11px;
+    padding-left: 8px;
+  }
+
+  .sort-options {
+    width: 100%;
+  }
+
+  .sort-btn {
+    min-width: 0;
+    flex: 1;
+    height: 30px;
+    font-size: 12px;
+  }
+
+  .heatmap-grid {
+    margin-top: 4px;
+    min-height: 400px;
+  }
+
+  /* 移动端热力图砖块 - 放大 */
+  .heat-tile {
+    padding: 6px 3px 3px;
+    gap: 3px;
+  }
+
+  .tile-name {
+    font-size: 10px;
+  }
+
+  .heat-tile strong {
+    font-size: 13px;
+  }
+
+  .tile-flow {
+    font-size: 9px;
+  }
+
+  .heat-tile.area-xxl .tile-name { font-size: 13px; }
+  .heat-tile.area-xxl strong { font-size: 18px; }
+  .heat-tile.area-xl .tile-name,
+  .heat-tile.area-lg .tile-name { font-size: 12px; }
+  .heat-tile.area-xl strong,
+  .heat-tile.area-lg strong { font-size: 16px; }
+  .heat-tile.area-md .tile-name { font-size: 10px; }
+  .heat-tile.area-md strong { font-size: 13px; }
+  .heat-tile.area-sm { padding: 3px 1px; }
+  .heat-tile.area-sm .tile-name { font-size: 9px; }
+  .heat-tile.area-sm strong { font-size: 10px; }
+
+  .more-tile { font-size: 20px; }
+
+  .heatmap-scale {
+    height: 28px;
+    grid-template-columns: 28px 1fr 28px;
+    gap: 8px;
+    font-size: 11px;
+  }
+
+  .scale-gradient { height: 5px; }
+
+  .heatmap-note {
+    font-size: 10px;
+    padding-top: 5px;
+  }
+
+  /* 详情面板 → 底部弹出层 */
+  .detail-panel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    max-height: 85vh;
+    padding: 16px 12px 16px;
+    border: 0;
+    border-top: 2px solid #ff9800;
+    border-radius: 16px 16px 0 0;
+    background: linear-gradient(180deg, #0f181c 0%, #070d10 100%);
+    box-shadow: 0 -8px 32px rgba(0,0,0,0.6);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    animation: slideUp 0.25s ease-out;
+  }
+
+  @keyframes slideUp {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+
+  .detail-header {
+    padding-bottom: 10px;
+  }
+
+  .detail-header h2 { font-size: 16px; }
+  .detail-header strong { font-size: 18px; }
+
+  .detail-metrics {
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 12px;
+    font-size: 11px;
+  }
+
+  .stock-detail-metrics {
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 12px;
+  }
+
+  .leader-title {
+    font-size: 13px;
+    padding: 8px 0 6px;
+  }
+
+  .stock-row {
+    min-height: 36px;
+    grid-template-columns: 1.2fr 0.5fr 0.5fr 0.6fr 0.6fr;
+    gap: 4px;
+    padding: 0 8px;
+    font-size: 11px;
+  }
+
+  .stock-row.table-head {
+    min-height: 28px;
+    font-size: 10px;
+  }
+
+  .stock-name-cell { gap: 5px; }
+  .stock-name-cell b { width: 14px; height: 14px; font-size: 9px; }
+  .stock-name-cell small { font-size: 9px; }
+
+  .detail-close {
+    font-size: 24px;
+    padding: 8px 10px;
+    margin: -8px -4px -8px 0;
+  }
+
+  .empty-table,
+  .panel-empty {
+    padding: 24px 12px;
+    font-size: 12px;
+  }
+
+  .detail-foot {
+    margin-top: 12px;
+    padding-top: 8px;
+    font-size: 10px;
+  }
+}
