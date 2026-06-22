@@ -156,6 +156,12 @@ export interface SectorRankingItem {
   changePercent: number
   marketValue: number
   source: string
+  dayLeader?: {
+    name: string
+    code: string
+    price?: number | null
+    changePercent: number
+  }
 }
 
 export interface SectorRankingPair {

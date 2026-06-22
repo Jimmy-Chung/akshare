@@ -14,6 +14,7 @@ import { formatError, requestJson } from '../utils/api'
 import {
   formatChineseAmount,
   formatPercent,
+  formatPrice,
   formatReportDate,
   getTrendClass,
   sessionLabel,
@@ -29,26 +30,57 @@ const SCHEDULE = [
 function RankingList({
   title,
   items,
+  showIndustryRelationship = false,
 }: {
   title: string
   items: SectorRankingItem[]
+  showIndustryRelationship?: boolean
 }) {
   return (
     <div className="report-ranking-list">
       <h4>{title}</h4>
       {items.map((item, index) => (
-        <div className="report-ranking-row" key={item.code || `${item.name}-${index}`}>
-          <span className="report-ranking-index">{index + 1}</span>
-          <span className="report-ranking-name">
-            <strong>{item.name}</strong>
-            <small>{item.parentName || item.code}</small>
-          </span>
-          <span>
-            <strong className={getTrendClass(item.changePercent)}>
-              {formatPercent(item.changePercent)}
-            </strong>
-            <small>{item.marketValue ? formatChineseAmount(item.marketValue) : '--'}</small>
-          </span>
+        <div
+          className={showIndustryRelationship ? 'report-ranking-row report-ranking-row--linked' : 'report-ranking-row'}
+          key={item.code || `${item.name}-${index}`}
+        >
+          <div className="report-ranking-main">
+            <span className="report-ranking-index">{index + 1}</span>
+            <span className="report-ranking-name">
+              {showIndustryRelationship && item.parentName ? (
+                <small className="report-ranking-parent">
+                  <span>一级分类</span>
+                  <strong>{item.parentName}</strong>
+                </small>
+              ) : null}
+              <strong>{item.name}</strong>
+              {!showIndustryRelationship ? <small>{item.parentName || item.code}</small> : null}
+            </span>
+            <span className="report-ranking-value">
+              <strong className={getTrendClass(item.changePercent)}>
+                {formatPercent(item.changePercent)}
+              </strong>
+              <small>{item.marketValue ? formatChineseAmount(item.marketValue) : '--'}</small>
+            </span>
+          </div>
+          {showIndustryRelationship ? (
+            <div className="report-ranking-leader">
+              <span className="report-ranking-link-mark" aria-hidden="true">↳</span>
+              <span>
+                <small>行业领涨股</small>
+                <strong>{item.dayLeader?.name || '暂无数据'}</strong>
+              </span>
+              <span className="report-ranking-leader-code">
+                <small>{item.dayLeader?.code || '--'}</small>
+                <strong>
+                  {item.dayLeader?.price == null ? '--' : formatPrice(item.dayLeader.price)}
+                </strong>
+              </span>
+              <strong className={getTrendClass(item.dayLeader?.changePercent ?? 0)}>
+                {item.dayLeader?.name ? formatPercent(item.dayLeader.changePercent) : '--'}
+              </strong>
+            </div>
+          ) : null}
         </div>
       ))}
     </div>
@@ -58,16 +90,26 @@ function RankingList({
 function RankingLevel({
   title,
   ranking,
+  showIndustryRelationship = false,
 }: {
   title: string
   ranking: SectorRankingPair
+  showIndustryRelationship?: boolean
 }) {
   return (
     <section className="report-ranking-level">
       <h3>{title}</h3>
       <div className="report-ranking-columns">
-        <RankingList title="领涨前三" items={ranking.leaders} />
-        <RankingList title="领跌前三" items={ranking.laggards} />
+        <RankingList
+          title="领涨前三"
+          items={ranking.leaders}
+          showIndustryRelationship={showIndustryRelationship}
+        />
+        <RankingList
+          title="领跌前三"
+          items={ranking.laggards}
+          showIndustryRelationship={showIndustryRelationship}
+        />
       </div>
     </section>
   )
@@ -221,7 +263,11 @@ export default function ReportPage() {
                     </div>
                   </div>
                   <RankingLevel title="一级分类" ranking={market.primary} />
-                  <RankingLevel title="二级行业" ranking={market.secondary} />
+                  <RankingLevel
+                    title="二级行业 · 分类与领涨股关联"
+                    ranking={market.secondary}
+                    showIndustryRelationship
+                  />
                 </section>
               ))}
             </div>

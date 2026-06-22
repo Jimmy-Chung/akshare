@@ -11,7 +11,7 @@ from providers import legacy_market, longbridge
 from providers.common import merge_preferred_rows
 from providers.market_catalog import GLOBAL_INDEX_ORDER, GLOBAL_MARKET_REGIONS
 
-REPORT_SCHEMA_VERSION = 4
+REPORT_SCHEMA_VERSION = 5
 REPORT_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 SESSION_TIMES = {
@@ -85,7 +85,10 @@ def report_automation_config(api_base_url: str) -> Dict[str, Any]:
         {
             "key": "sectorRankings",
             "title": "主要市场板块涨跌幅前三",
-            "description": "分别整理一级分类与二级行业的领涨、领跌前三",
+            "description": (
+                "分别整理一级分类与二级行业的领涨、领跌前三；"
+                "二级行业必须注明所属一级分类及行业领涨股"
+            ),
         },
     ]
     jobs = []
@@ -127,6 +130,10 @@ def report_automation_config(api_base_url: str) -> Dict[str, Any]:
             "workflow": [
                 "使用 Bearer 凭证调用 generate 接口生成并保存当前时段日报",
                 "根据返回 JSON 的三个 sections 整理中文日报",
+                (
+                    "二级行业逐项展示所属一级分类，并展示 dayLeader 中的"
+                    "领涨股名称、代码、价格与涨跌幅"
+                ),
                 "保留备用数据源标记，不得将 fallback 数据描述为 Longbridge 数据",
                 "在结果中注明数据生成时间及当前时段覆盖的市场",
             ],
@@ -276,6 +283,14 @@ def _rank_rows(
             "changePercent": float(item.get("changePercent") or 0),
             "marketValue": float(item.get("marketValue") or 0),
             "source": "Longbridge",
+            "dayLeader": {
+                "name": str((item.get("dayLeader") or {}).get("name") or ""),
+                "code": str((item.get("dayLeader") or {}).get("code") or ""),
+                "price": (item.get("dayLeader") or {}).get("price"),
+                "changePercent": float(
+                    (item.get("dayLeader") or {}).get("changePercent") or 0
+                ),
+            },
         }
         for item in rows
         if item.get("name")
