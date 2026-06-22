@@ -6,4 +6,7 @@ __pycache__/
 node_modules/
 dist/
 logs/*.log
+longbridge.*.log
 *.pid
+backend/data_service/runtime_cache/
+.codex-backup-*/

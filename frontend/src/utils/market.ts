@@ -1,6 +1,9 @@
-export const UP_COLOR = '#ff4d43'
-export const DOWN_COLOR = '#4caf50'
-export const FLAT_COLOR = '#8a949e'
+import type { ChartPoint, IndexSnapshot, SessionKey } from '../types/market'
+
+export const UP_COLOR = '#e5484d'
+export const DOWN_COLOR = '#16a34a'
+export const FLAT_COLOR = '#94a3b8'
+export const ACCENT_COLOR = '#1f6feb'
 
 export const getTrendColor = (changePercent: number) => {
   if (changePercent > 0) return UP_COLOR
@@ -17,7 +20,7 @@ export const getTrendClass = (changePercent: number) => {
 export const formatPrice = (value: number, digits = 2) => {
   return value.toLocaleString('zh-CN', {
     minimumFractionDigits: digits,
-    maximumFractionDigits: digits
+    maximumFractionDigits: digits,
   })
 }
 
@@ -50,13 +53,57 @@ export const formatChineseAmount = (value: number) => {
   return `${sign}${absValue.toFixed(2)}`
 }
 
-export const formatDashboardTime = (date = new Date()) => {
-  const pad = (value: number) => value.toString().padStart(2, '0')
-  const month = pad(date.getMonth() + 1)
-  const day = pad(date.getDate())
-  const hours = pad(date.getHours())
-  const minutes = pad(date.getMinutes())
-  const seconds = pad(date.getSeconds())
+export const formatDashboardTime = (value?: string) => {
+  if (!value) return '--'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
 
-  return `${month}-${day} ${hours}:${minutes}:${seconds}`
+export const formatReportDate = (value?: string) => {
+  if (!value) return '--'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
+export const formatShortDate = (value?: string) => {
+  if (!value) return '--'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
+export const buildChartPoints = (entry: Pick<IndexSnapshot, 'intradayData' | 'price' | 'previousClose'>): ChartPoint[] => {
+  const intraday = entry.intradayData?.filter((item) => Number.isFinite(item.value))
+  if (intraday && intraday.length >= 2) {
+    return intraday
+  }
+  return []
+}
+
+export const sessionLabel = (session: SessionKey) => {
+  if (session === 'morning') return '早盘 09:30'
+  if (session === 'midday') return '午盘 12:30'
+  if (session === 'close') return '收盘 16:30'
+  return '美股夜盘 22:30'
 }
