@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import GlobalOverviewBar from '../components/GlobalOverviewBar'
 import IndicesSection from '../components/IndicesSection'
+import LongbridgeSectorHeatmap from '../components/LongbridgeSectorHeatmap'
 import SessionSwitcher from '../components/SessionSwitcher'
 import { EmptyState, InlineError, SkeletonBlocks } from '../components/StateBlocks'
 import type {
@@ -116,7 +117,13 @@ function RankingLevel({
 }
 
 export default function ReportPage() {
-  const [session, setSession] = useState<SessionKey>('morning')
+  const requestedSession = new URLSearchParams(window.location.search).get('session')
+  const initialSession: SessionKey = (
+    requestedSession === 'midday'
+    || requestedSession === 'close'
+    || requestedSession === 'us-night'
+  ) ? requestedSession : 'morning'
+  const [session, setSession] = useState<SessionKey>(initialSession)
   const [report, setReport] = useState<SessionReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [regenerating, setRegenerating] = useState(false)
@@ -142,7 +149,7 @@ export default function ReportPage() {
   }
 
   useEffect(() => {
-    loadReport()
+    loadReport(initialSession)
   }, [])
 
   const groups: MarketIndexGroup[] = (report?.majorMarkets ?? []).map((group) => ({
@@ -151,6 +158,11 @@ export default function ReportPage() {
     subtitle: group.subtitle,
     indices: group.indices,
   }))
+  const preferredCodes = Object.fromEntries(
+    (report?.chartExports ?? [])
+      .filter((item) => item.kind === 'trend' && item.groupKey && item.indexCode)
+      .map((item) => [item.groupKey as string, item.indexCode as string]),
+  )
 
   return (
     <div className="page-layout">
@@ -243,6 +255,8 @@ export default function ReportPage() {
             groups={groups}
             title="主要市场主要指数"
             kicker="Major Market Indices"
+            preferredCodes={preferredCodes}
+            exportFilenamePrefix={session}
           />
 
           <section className="surface-card">
@@ -267,6 +281,13 @@ export default function ReportPage() {
                     title="二级行业 · 分类与领涨股关联"
                     ranking={market.secondary}
                     showIndustryRelationship
+                  />
+                  <LongbridgeSectorHeatmap
+                    market={market.market}
+                    showMarketTabs={false}
+                    exportFilenamePrefix={session}
+                    reportMode
+                    generatedAt={report.generatedAt}
                   />
                 </section>
               ))}

@@ -638,6 +638,174 @@
   font-size: 13px;
 }
 
+.chart-export-button {
+  padding: 6px 10px;
+  border: 1px solid var(--line-default);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+
+.chart-export-button:hover {
+  border-color: rgba(31, 111, 235, 0.4);
+  color: var(--accent);
+}
+
+.chart-export-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.chart-export-button--inline {
+  position: static;
+  align-self: center;
+}
+
+.chart-export-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.chart-export-toolbar > span {
+  color: var(--text-secondary);
+  font-family: var(--font-number);
+  font-size: 10px;
+}
+
+.report-chart-card {
+  overflow: hidden;
+  border: 1px solid var(--line-default);
+  border-radius: 18px;
+  background: #ffffff;
+}
+
+.report-chart-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 12px;
+}
+
+.report-chart-card__header span,
+.report-chart-card__header small,
+.report-chart-card__footer {
+  color: var(--text-secondary);
+}
+
+.report-chart-card__header h3 {
+  margin: 4px 0;
+  font-size: 20px;
+}
+
+.report-chart-card__footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px 14px;
+  font-size: 11px;
+}
+
+.report-index-chart-card {
+  min-width: 0;
+  padding-bottom: 4px;
+}
+
+.report-index-chart-card__metrics {
+  display: flex;
+  align-items: baseline;
+  gap: 18px;
+  padding: 0 20px 12px;
+  font-family: var(--font-number);
+}
+
+.report-index-chart-card__metrics > strong {
+  font-size: 30px;
+}
+
+.report-index-chart-card__metrics > span {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.report-index-chart-card .line-chart {
+  width: auto;
+  min-width: 0;
+  margin: 0 12px;
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.report-heatmap-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line-default);
+}
+
+.report-heatmap-section > .section-heading {
+  margin-bottom: 12px;
+}
+
+.lb-sector-layout--report {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.report-heatmap-chart-card {
+  min-width: 0;
+}
+
+.report-heatmap-export-stage {
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 10px;
+}
+
+.report-heatmap-chart-card--full {
+  width: 1440px;
+  max-width: none;
+}
+
+.report-heatmap-chart-card--full .lb-treemap--report {
+  height: 980px;
+  margin: 0 12px;
+  border: 1px solid var(--line-default);
+  border-radius: 14px;
+  background: #f8fafc;
+  overflow: hidden;
+}
+
+.report-heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.report-heatmap-legend span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.report-heatmap-legend .is-up {
+  background: rgba(229, 72, 77, 0.1);
+}
+
+.report-heatmap-legend .is-down {
+  background: rgba(22, 163, 74, 0.1);
+}
+
+.report-heatmap-legend .is-flat {
+  background: rgba(148, 163, 184, 0.14);
+}
+
 .weights-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }

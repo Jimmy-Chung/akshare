@@ -142,11 +142,30 @@ export interface SessionReport {
     indices: IndexSnapshot[]
   }>
   sectorRankings: SectorRankingGroup[]
+  chartExports: ChartExportTarget[]
   sources: {
     globalIndices: string
     majorIndices: string
     sectorRankings: string
   }
+}
+
+export interface ChartExportTarget {
+  id: string
+  kind: 'trend' | 'heatmap'
+  title: string
+  pageUrl: string
+  chartId: string
+  exportButtonId: string
+  captureSelector: string
+  filename: string
+  market: 'CN' | 'HK' | 'US'
+  contentRequirements: string[]
+  renderMode: 'index-summary-card' | 'full-market-hierarchy'
+  minimumImageWidth: number
+  minimumImageHeight: number
+  groupKey?: string
+  indexCode?: string
 }
 
 export interface SectorRankingItem {

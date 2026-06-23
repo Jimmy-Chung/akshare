@@ -18,11 +18,15 @@ const MARKET_TABS: Array<{ key: DashboardMarket; label: string }> = [
 ]
 
 export default function DashboardPage() {
+  const exportSession = new URLSearchParams(window.location.search).get('session') || ''
   const [data, setData] = useState<DashboardOverview | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [market, setMarket] = useState<DashboardMarket>('CN')
+  const [market, setMarket] = useState<DashboardMarket>(() => {
+    const requested = new URLSearchParams(window.location.search).get('market')?.toUpperCase()
+    return requested === 'HK' || requested === 'US' ? requested : 'CN'
+  })
 
   const loadOverview = async (silent = false) => {
     if (silent) {
@@ -178,7 +182,11 @@ export default function DashboardPage() {
           kicker="Market Indices"
           loading={loading && !data}
         />
-        <LongbridgeSectorHeatmap market={market} showMarketTabs={false} />
+        <LongbridgeSectorHeatmap
+          market={market}
+          showMarketTabs={false}
+          exportFilenamePrefix={exportSession}
+        />
         <WeightStocksSection
           title={activeMarket.weightTitle}
           subtitle={activeMarket.weightSubtitle}

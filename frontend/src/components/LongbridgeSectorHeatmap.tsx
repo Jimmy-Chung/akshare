@@ -5,7 +5,17 @@ import * as echarts from 'echarts/core'
 import type { EChartsOption } from 'echarts'
 import { CanvasRenderer } from 'echarts/renderers'
 import ReactEChartsCore from 'echarts-for-react/lib/core'
-import { formatChineseAmount, formatPercent, formatPrice, getTrendClass } from '../utils/market'
+import {
+  downloadCanvasImage,
+  exportChartElement,
+} from '../utils/chartExport'
+import {
+  formatChineseAmount,
+  formatDashboardTime,
+  formatPercent,
+  formatPrice,
+  getTrendClass,
+} from '../utils/market'
 import { formatError, requestJson } from '../utils/api'
 import { EmptyState, InlineError, SkeletonBlocks } from './StateBlocks'
 
@@ -72,6 +82,9 @@ interface IndustryDetailResponse {
 interface LongbridgeSectorHeatmapProps {
   market?: MarketKey
   showMarketTabs?: boolean
+  exportFilenamePrefix?: string
+  reportMode?: boolean
+  generatedAt?: string
 }
 
 const MARKET_TABS: Array<{ key: MarketKey; label: string }> = [
@@ -92,14 +105,24 @@ function heatColor(changePercent: number) {
   return '#64748b'
 }
 
-function heatmapSize(marketValue: number | null | undefined, changePercent: number, mode: SizeMode) {
-  if (mode === 'changePercent') return Math.max(Math.abs(changePercent), 0.05)
+function heatmapSize(
+  marketValue: number | null | undefined,
+  changePercent: number,
+  mode: SizeMode,
+  fullReport = false,
+) {
+  if (mode === 'changePercent') {
+    return Math.max(Math.abs(changePercent), fullReport ? 0.8 : 0.05)
+  }
   return marketValue && marketValue > 0 ? marketValue : 1
 }
 
 export default function LongbridgeSectorHeatmap({
   market: controlledMarket,
   showMarketTabs = true,
+  exportFilenamePrefix = '',
+  reportMode = false,
+  generatedAt,
 }: LongbridgeSectorHeatmapProps) {
   const [internalMarket, setInternalMarket] = useState<MarketKey>('CN')
   const market = controlledMarket ?? internalMarket
@@ -110,8 +133,11 @@ export default function LongbridgeSectorHeatmap({
   const [loading, setLoading] = useState(true)
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState('')
-  const [sizeMode, setSizeMode] = useState<SizeMode>('marketValue')
+  const [sizeMode, setSizeMode] = useState<SizeMode>(
+    reportMode ? 'changePercent' : 'marketValue',
+  )
   const requestSequence = useRef(0)
+  const chartRef = useRef<ReactEChartsCore | null>(null)
 
   const loadSummary = async (target: MarketKey) => {
     const requestId = ++requestSequence.current
@@ -195,14 +221,14 @@ export default function LongbridgeSectorHeatmap({
       series: [{
         type: 'treemap',
         roam: false,
-        nodeClick: isDrilled ? false : 'zoomToNode',
+        nodeClick: reportMode || isDrilled ? false : 'zoomToNode',
         breadcrumb: {
-          show: !isDrilled,
+          show: !reportMode && !isDrilled,
           bottom: 4,
           height: 24,
         },
         width: '100%',
-        height: isDrilled ? '100%' : '95%',
+        height: reportMode || isDrilled ? '100%' : '95%',
         top: 0,
         left: 0,
         label: {
@@ -217,14 +243,21 @@ export default function LongbridgeSectorHeatmap({
             return `${raw.item.name}\n${formatPercent(raw.item.changePercent)}`
           },
           overflow: 'truncate',
-          fontSize: 12,
-          lineHeight: 18,
+          fontSize: reportMode ? 16 : 12,
+          fontWeight: reportMode ? 600 : 400,
+          lineHeight: reportMode ? 23 : 18,
         },
         upperLabel: {
           show: true,
-          height: 28,
+          height: reportMode ? 48 : 38,
           color: '#334155',
           fontWeight: 700,
+          fontSize: reportMode ? 20 : 12,
+          formatter: (params: any) => {
+            const raw = params.data?.raw as { kind: 'group'; item: IndustryGroup } | undefined
+            if (!raw || raw.kind !== 'group') return params.name
+            return `${raw.item.name}  ${formatPercent(raw.item.changePercent)}`
+          },
         },
         itemStyle: {
           borderColor: '#fff',
@@ -234,11 +267,11 @@ export default function LongbridgeSectorHeatmap({
         levels: [
           {
             itemStyle: { borderColor: '#cbd5e1', borderWidth: 4, gapWidth: 4 },
-            upperLabel: { show: true, height: 30 },
+            upperLabel: { show: true, height: reportMode ? 48 : 30 },
           },
           {
             itemStyle: { borderColor: '#e2e8f0', borderWidth: 3, gapWidth: 3 },
-            upperLabel: { show: true, height: 27 },
+            upperLabel: { show: true, height: reportMode ? 42 : 27 },
           },
           {
             itemStyle: { borderColor: '#fff', borderWidth: 1, gapWidth: 1 },
@@ -267,20 +300,99 @@ export default function LongbridgeSectorHeatmap({
               raw: { kind: 'group', item: group },
               children: group.industries.map((industry) => ({
                 name: industry.name,
-                value: heatmapSize(industry.marketValue, industry.changePercent, sizeMode),
+                value: heatmapSize(
+                  industry.marketValue,
+                  industry.changePercent,
+                  sizeMode,
+                  reportMode,
+                ),
                 itemStyle: { color: heatColor(industry.changePercent) },
                 raw: { kind: 'industry', item: industry },
               })),
             })),
       }],
     }
-  }, [summary, industryDetail, sizeMode])
+  }, [summary, industryDetail, sizeMode, reportMode])
+
+  const chartId = `heatmap-${market.toLowerCase()}`
+  const exportFilename = `${exportFilenamePrefix ? `${exportFilenamePrefix}-` : ''}${chartId}.png`
+  const exportReportHeatmap = () => {
+    const instance = chartRef.current?.getEchartsInstance()
+    const sourceCanvas = instance?.getDom().querySelector('canvas')
+    if (!sourceCanvas || !summary) return
+
+    const width = 1440
+    const headerHeight = 142
+    const chartHeight = 980
+    const footerHeight = 64
+    const pixelRatio = 1
+    const canvas = document.createElement('canvas')
+    canvas.width = width * pixelRatio
+    canvas.height = (headerHeight + chartHeight + footerHeight) * pixelRatio
+    const context = canvas.getContext('2d')
+    if (!context) return
+
+    context.scale(pixelRatio, pixelRatio)
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, width, headerHeight + chartHeight + footerHeight)
+    context.fillStyle = '#64748b'
+    context.font = '24px sans-serif'
+    context.fillText(`${marketLabel}市场`, 28, 36)
+    context.fillStyle = '#111827'
+    context.font = '700 34px sans-serif'
+    context.fillText(`${marketLabel}全量一级分类与二级行业热力图`, 28, 82)
+    context.fillStyle = '#64748b'
+    context.font = '20px sans-serif'
+    context.fillText(
+      '全量可读模式 · 面积按涨跌幅绝对值并设置最小可视面积 · 颜色表示涨跌方向',
+      28,
+      116,
+    )
+
+    const legends = [
+      { label: '下跌', color: '#16a34a' },
+      { label: '持平', color: '#94a3b8' },
+      { label: '上涨', color: '#e5484d' },
+    ]
+    legends.forEach((item, index) => {
+      const x = 1138 + index * 92
+      context.fillStyle = item.color
+      context.fillRect(x, 26, 18, 18)
+      context.fillStyle = '#475569'
+      context.font = '18px sans-serif'
+      context.fillText(item.label, x + 26, 42)
+    })
+
+    context.drawImage(sourceCanvas, 14, headerHeight, width - 28, chartHeight)
+    context.fillStyle = '#64748b'
+    context.font = '18px sans-serif'
+    context.fillText(
+      `共 ${summary.groups.length} 个一级分类 · ${summary.industries.length} 个二级行业`,
+      28,
+      headerHeight + chartHeight + 40,
+    )
+    context.textAlign = 'right'
+    context.fillText(
+      `更新于 ${formatDashboardTime(generatedAt || summary.updatedAt)}`,
+      width - 28,
+      headerHeight + chartHeight + 40,
+    )
+    context.textAlign = 'left'
+    downloadCanvasImage(canvas, exportFilename)
+  }
+  const exportChart = () => (
+    reportMode
+      ? exportReportHeatmap()
+      : exportChartElement(chartId, exportFilename)
+  )
 
   return (
-    <section className="surface-card">
+    <section className={reportMode ? 'report-heatmap-section' : 'surface-card'}>
       <div className="section-heading">
         <div>
-          <span className="section-kicker">Longbridge Sector Map</span>
+          <span className="section-kicker">
+            {reportMode ? 'Report Sector Heatmap' : 'Longbridge Sector Map'}
+          </span>
           <h2>{marketLabel}板块热力图</h2>
           <p>
             {sizeMode === 'marketValue'
@@ -289,6 +401,18 @@ export default function LongbridgeSectorHeatmap({
           </p>
         </div>
         <div className="lb-heatmap-controls">
+          <button
+            type="button"
+            className="chart-export-button chart-export-button--inline"
+            data-export-chart-id={chartId}
+            data-export-filename={exportFilename}
+            aria-label={`导出图表 ${chartId}`}
+            onClick={() => void exportChart()}
+            disabled={loading || !summary?.groups.length}
+          >
+            导出 PNG
+          </button>
+          {!reportMode ? (
           <div className="session-switcher heatmap-mode-switcher" aria-label="面积模式">
             {SIZE_MODES.map((mode) => (
               <button
@@ -301,6 +425,7 @@ export default function LongbridgeSectorHeatmap({
               </button>
             ))}
           </div>
+          ) : null}
           {showMarketTabs ? (
             <div className="session-switcher" aria-label="板块市场">
               {MARKET_TABS.map((tab) => (
@@ -338,12 +463,39 @@ export default function LongbridgeSectorHeatmap({
 
           {error ? <InlineError message={error} onRetry={() => loadSummary(market)} /> : null}
 
-          <div className="lb-sector-layout">
-            <div className="lb-treemap lb-treemap--hierarchy">
+          <div className={reportMode ? 'lb-sector-layout lb-sector-layout--report' : 'lb-sector-layout'}>
+            <div className={reportMode ? 'report-heatmap-export-stage' : undefined}>
+            <div
+              className={reportMode
+                ? 'report-chart-card report-heatmap-chart-card report-heatmap-chart-card--full'
+                : 'lb-treemap lb-treemap--hierarchy'}
+              data-chart-id={reportMode ? chartId : undefined}
+            >
+              {reportMode ? (
+                <div className="report-chart-card__header">
+                  <div>
+                    <span>{marketLabel}市场</span>
+                    <h3>{marketLabel}全量一级分类与二级行业热力图</h3>
+                    <small>
+                      全量可读模式 · 面积按涨跌幅绝对值并设置最小可视面积 · 颜色表示涨跌方向
+                    </small>
+                  </div>
+                  <div className="report-heatmap-legend">
+                    <span className="is-down">下跌</span>
+                    <span className="is-flat">持平</span>
+                    <span className="is-up">上涨</span>
+                  </div>
+                </div>
+              ) : null}
+              <div
+                className={reportMode ? 'lb-treemap lb-treemap--report' : undefined}
+                data-chart-id={reportMode ? undefined : chartId}
+              >
               <ReactEChartsCore
+                ref={chartRef}
                 echarts={echarts}
                 option={chartOption}
-                style={{ height: 590, width: '100%' }}
+                style={{ height: reportMode ? 980 : 590, width: '100%' }}
                 onEvents={{
                   click: (params: any) => {
                     const raw = params.data?.raw as
@@ -356,11 +508,23 @@ export default function LongbridgeSectorHeatmap({
                 }}
                 notMerge
               />
+              </div>
+              {reportMode ? (
+                <div className="report-chart-card__footer">
+                  <span>一级分类标题包含综合涨跌幅，色块为二级行业</span>
+                  <span>
+                    共 {summary.groups.length} 个一级分类 · {summary.industries.length} 个二级行业 ·
+                    更新于 {formatDashboardTime(generatedAt || summary.updatedAt)}
+                  </span>
+                </div>
+              ) : null}
               {detailLoading ? (
                 <div className="lb-heatmap-loading">正在加载行业成分股…</div>
               ) : null}
             </div>
+            </div>
 
+            {!reportMode ? (
             <aside className="lb-sector-side lb-sector-side--compact">
               {industryDetail && selectedStock ? (
                 <div className="side-panel">
@@ -411,6 +575,7 @@ export default function LongbridgeSectorHeatmap({
                 </div>
               )}
             </aside>
+            ) : null}
           </div>
         </>
       )}

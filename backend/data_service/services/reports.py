@@ -11,7 +11,7 @@ from providers import legacy_market, longbridge
 from providers.common import merge_preferred_rows
 from providers.market_catalog import GLOBAL_INDEX_ORDER, GLOBAL_MARKET_REGIONS
 
-REPORT_SCHEMA_VERSION = 5
+REPORT_SCHEMA_VERSION = 8
 REPORT_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 SESSION_TIMES = {
@@ -39,6 +39,24 @@ MARKET_LABELS = {
     "CN": "A 股",
     "HK": "港股",
     "US": "美股",
+}
+
+REPORT_CHART_INDEXES = {
+    "CN": {
+        "groupKey": "CN",
+        "code": "000001.SH",
+        "title": "上证指数走势",
+    },
+    "HK": {
+        "groupKey": "HK",
+        "code": "HSI.HK",
+        "title": "恒生指数走势",
+    },
+    "US": {
+        "groupKey": "US",
+        "code": ".SPX.US",
+        "title": "标普 500 指数走势",
+    },
 }
 
 CACHE_DIR = Path(__file__).resolve().parents[1] / "runtime_cache"
@@ -90,6 +108,14 @@ def report_automation_config(api_base_url: str) -> Dict[str, Any]:
                 "二级行业必须注明所属一级分类及行业领涨股"
             ),
         },
+        {
+            "key": "chartExports",
+            "title": "日报图表附件",
+            "description": (
+                "按 chartExports 中的 pageUrl 打开日报页面，使用 exportButtonId"
+                " 导出带标题、市场、涨跌信息和更新时间的完整图表卡片 PNG"
+            ),
+        },
     ]
     jobs = []
     for item in report_schedule():
@@ -133,6 +159,19 @@ def report_automation_config(api_base_url: str) -> Dict[str, Any]:
                 (
                     "二级行业逐项展示所属一级分类，并展示 dayLeader 中的"
                     "领涨股名称、代码、价格与涨跌幅"
+                ),
+                (
+                    "逐项处理 chartExports：打开 pageUrl，等待 data-chart-id"
+                    " 对应图表完成渲染，点击 data-export-chart-id 等于"
+                    " exportButtonId 的按钮导出 PNG，并将图片附在日报末尾；"
+                    "若下载文件不可访问，则按 captureSelector 精确截取图表区域"
+                    "作为同名 PNG 附件；附件必须包含图表标题、所属市场、"
+                    "关键行情信息与更新时间，不得只截取裸 canvas 或无文字色块"
+                ),
+                (
+                    "按 renderMode 和 contentRequirements 验收附件，并确保图片"
+                    "尺寸不低于 minimumImageWidth × minimumImageHeight；"
+                    "full-market-hierarchy 必须包含该市场全部一级和二级行业"
                 ),
                 "保留备用数据源标记，不得将 fallback 数据描述为 Longbridge 数据",
                 "在结果中注明数据生成时间及当前时段覆盖的市场",
@@ -320,6 +359,65 @@ def _sector_rankings(markets: List[str]) -> List[Dict[str, Any]]:
     return result
 
 
+def _chart_exports(session: str, markets: List[str]) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    for market in markets:
+        index = REPORT_CHART_INDEXES[market]
+        normalized_code = (
+            index["code"].lower().replace(".", "-").strip("-")
+        )
+        trend_id = f"trend-{normalized_code}"
+        result.append({
+            "id": f"{session}-{market.lower()}-trend",
+            "kind": "trend",
+            "title": index["title"],
+            "pageUrl": f"/?session={session}#report",
+            "chartId": trend_id,
+            "exportButtonId": trend_id,
+            "captureSelector": f'[data-chart-id="{trend_id}"]',
+            "filename": f"{session}-{trend_id}.png",
+            "market": market,
+            "groupKey": market,
+            "indexCode": index["code"],
+            "contentRequirements": [
+                "指数名称与代码",
+                "当前点位",
+                "涨跌额与涨跌幅",
+                "带北京时间刻度的分时曲线",
+                "数据更新时间",
+            ],
+            "renderMode": "index-summary-card",
+            "minimumImageWidth": 900,
+            "minimumImageHeight": 760,
+        })
+
+        heatmap_id = f"heatmap-{market.lower()}"
+        result.append({
+            "id": f"{session}-{market.lower()}-heatmap",
+            "kind": "heatmap",
+            "title": f"{MARKET_LABELS[market]}板块热力图",
+            "pageUrl": f"/?session={session}#report",
+            "chartId": heatmap_id,
+            "exportButtonId": heatmap_id,
+            "captureSelector": f'[data-chart-id="{heatmap_id}"]',
+            "filename": f"{session}-{heatmap_id}.png",
+            "market": market,
+            "contentRequirements": [
+                "市场名称",
+                "当前时段该市场全部一级行业和全部二级行业",
+                "一级行业名称与综合涨跌幅",
+                "二级行业名称与涨跌幅",
+                "红涨绿跌图例",
+                "页脚明确显示一级行业总数和二级行业总数",
+                "数据更新时间",
+            ],
+            "renderMode": "full-market-hierarchy",
+            "minimumImageWidth": 1400,
+            "minimumImageHeight": 1100,
+        })
+    return result
+
+
 def build_report(session: str, _news_digest: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     if session not in SESSION_TIMES:
         session = latest_session()
@@ -339,6 +437,7 @@ def build_report(session: str, _news_digest: Optional[List[Dict[str, Any]]] = No
         "globalOverview": _global_groups(global_rows),
         "majorMarkets": _major_market_indices(major_rows, markets),
         "sectorRankings": _sector_rankings(markets),
+        "chartExports": _chart_exports(session, markets),
         "sources": {
             "globalIndices": "Longbridge 优先，缺失项使用备用公开行情",
             "majorIndices": "Longbridge 优先，缺失项使用备用公开行情",
@@ -353,6 +452,7 @@ def _is_current_schema(report: Any) -> bool:
         and report.get("schemaVersion") == REPORT_SCHEMA_VERSION
         and "globalOverview" in report
         and "sectorRankings" in report
+        and "chartExports" in report
     )
 
 

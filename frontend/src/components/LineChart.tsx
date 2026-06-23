@@ -82,7 +82,6 @@ export default function LineChart({
       handleScroll: false,
       handleScale: false,
     })
-
     const series = chart.addSeries(LineSeries, {
       color: lineColor(changePercent),
       lineWidth: 2,

@@ -40,6 +40,41 @@ class ReportRankingTests(unittest.TestCase):
             workflow = " ".join(job["workflow"])
             self.assertIn("dayLeader", workflow)
             self.assertIn("领涨股名称、代码、价格与涨跌幅", workflow)
+            self.assertIn("chartExports", workflow)
+            self.assertIn("exportButtonId", workflow)
+
+    def test_report_chart_exports_use_stable_ids(self):
+        from services.reports import _chart_exports
+
+        exports = _chart_exports("close", ["CN", "HK"])
+        self.assertEqual(
+            [item["chartId"] for item in exports],
+            [
+                "trend-000001-sh",
+                "heatmap-cn",
+                "trend-hsi-hk",
+                "heatmap-hk",
+            ],
+        )
+        self.assertEqual(exports[0]["indexCode"], "000001.SH")
+        self.assertEqual(exports[2]["indexCode"], "HSI.HK")
+        self.assertEqual(
+            exports[0]["captureSelector"],
+            '[data-chart-id="trend-000001-sh"]',
+        )
+        self.assertEqual(
+            exports[1]["pageUrl"],
+            "/?session=close#report",
+        )
+        self.assertIn("当前点位", exports[0]["contentRequirements"])
+        self.assertIn(
+            "当前时段该市场全部一级行业和全部二级行业",
+            exports[1]["contentRequirements"],
+        )
+        self.assertIn("一级行业名称与综合涨跌幅", exports[1]["contentRequirements"])
+        self.assertEqual(exports[1]["renderMode"], "full-market-hierarchy")
+        self.assertEqual(exports[1]["minimumImageWidth"], 1400)
+        self.assertEqual(exports[1]["minimumImageHeight"], 1100)
 
 
 if __name__ == "__main__":

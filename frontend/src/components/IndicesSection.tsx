@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react'
 import type { MarketIndexGroup } from '../types/market'
-import { buildChartPoints, formatPercent, formatPrice, formatSignedNumber, getTrendClass } from '../utils/market'
+import { exportChartElement, normalizeChartId } from '../utils/chartExport'
+import {
+  buildChartPoints,
+  formatDashboardTime,
+  formatPercent,
+  formatPrice,
+  formatSignedNumber,
+  getTrendClass,
+} from '../utils/market'
 import LineChart from './LineChart'
 import SourceBadge from './SourceBadge'
 import { EmptyState, SkeletonBlocks } from './StateBlocks'
@@ -10,6 +18,8 @@ interface IndicesSectionProps {
   loading?: boolean
   title?: string
   kicker?: string
+  preferredCodes?: Record<string, string>
+  exportFilenamePrefix?: string
 }
 
 export default function IndicesSection({
@@ -17,20 +27,32 @@ export default function IndicesSection({
   loading,
   title = '三市场主要指数',
   kicker = 'Cross Market Indices',
+  preferredCodes = {},
+  exportFilenamePrefix = '',
 }: IndicesSectionProps) {
   const [selectedCodes, setSelectedCodes] = useState<Record<string, string>>({})
 
   useEffect(() => {
     setSelectedCodes((current) => {
       const next = { ...current }
+      let changed = false
       for (const group of groups) {
-        if (!next[group.key] && group.indices[0]) {
+        const preferred = preferredCodes[group.key]
+        if (
+          preferred
+          && current[group.key] !== preferred
+          && group.indices.some((item) => item.code === preferred)
+        ) {
+          next[group.key] = preferred
+          changed = true
+        } else if (!next[group.key] && group.indices[0]) {
           next[group.key] = group.indices[0].code
+          changed = true
         }
       }
-      return next
+      return changed ? next : current
     })
-  }, [groups])
+  }, [groups, preferredCodes])
 
   return (
     <section className="surface-card">
@@ -48,6 +70,8 @@ export default function IndicesSection({
           {groups.map((group) => {
             const selected =
               group.indices.find((item) => item.code === selectedCodes[group.key]) ?? group.indices[0]
+            const chartId = selected ? `trend-${normalizeChartId(selected.code)}` : ''
+            const exportFilename = `${exportFilenamePrefix ? `${exportFilenamePrefix}-` : ''}${chartId}.png`
 
             return (
               <section key={group.key} className="market-panel">
@@ -90,14 +114,33 @@ export default function IndicesSection({
 
                     {selected ? (
                       <div className="focus-panel">
-                        <div className="focus-panel__meta">
-                          <div>
-                            <span className="meta-text">当前选中</span>
-                            <strong>{selected.name}</strong>
+                        <div className="chart-export-toolbar">
+                          <span>附件 ID：{chartId}</span>
+                          <button
+                            type="button"
+                            className="chart-export-button chart-export-button--inline"
+                            data-export-chart-id={chartId}
+                            data-export-filename={exportFilename}
+                            aria-label={`导出图表 ${chartId}`}
+                            onClick={() => void exportChartElement(chartId, exportFilename)}
+                          >
+                            导出 PNG
+                          </button>
+                        </div>
+                        <div
+                          className="report-chart-card report-index-chart-card"
+                          data-chart-id={chartId}
+                        >
+                          <div className="report-chart-card__header">
+                            <div>
+                              <span>{group.title}</span>
+                              <h3>{selected.name}</h3>
+                              <small>{selected.code} · {formatDashboardTime(selected.tradeDate)}</small>
+                            </div>
                             <SourceBadge source={selected.source} isFallback={selected.isFallback} />
                           </div>
-                          <div className="focus-stats">
-                            <span>{formatPrice(selected.price)}</span>
+                          <div className="report-index-chart-card__metrics">
+                            <strong>{formatPrice(selected.price)}</strong>
                             <span className={getTrendClass(selected.changePercent)}>
                               {formatPercent(selected.changePercent)}
                             </span>
@@ -105,17 +148,21 @@ export default function IndicesSection({
                               {formatSignedNumber(selected.changeAmount)}
                             </span>
                           </div>
+                          {buildChartPoints(selected).length >= 2 ? (
+                            <LineChart
+                              data={buildChartPoints(selected)}
+                              changePercent={selected.changePercent}
+                              height={220}
+                              showTimeScale
+                            />
+                          ) : (
+                            <div className="chart-empty-state">暂无真实分时走势</div>
+                          )}
+                          <div className="report-chart-card__footer">
+                            <span>分时走势</span>
+                            <span>时间均为北京时间</span>
+                          </div>
                         </div>
-                        {buildChartPoints(selected).length >= 2 ? (
-                          <LineChart
-                            data={buildChartPoints(selected)}
-                            changePercent={selected.changePercent}
-                            height={160}
-                            showTimeScale
-                          />
-                        ) : (
-                          <div className="chart-empty-state">暂无真实分时走势</div>
-                        )}
                       </div>
                     ) : null}
                   </>
