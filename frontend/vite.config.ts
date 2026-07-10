@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     port: 3005,
     strictPort: true,
+    allowedHosts: ['.jimmy-jam.com'],
     proxy: {
       '/api': {
         target: 'http://localhost:5001',

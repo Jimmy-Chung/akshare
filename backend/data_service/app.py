@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List
 from urllib.parse import urlencode
 
-from flask import Flask, jsonify, redirect, request, session
+from flask import Flask, jsonify, redirect, request, send_file, session
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -15,8 +15,17 @@ from providers import legacy_market, longbridge, longbridge_oauth, news, sectors
 from providers.common import merge_preferred_rows
 from providers.market_catalog import GLOBAL_INDEX_ORDER
 from services.dashboard import build_dashboard_overview
+from services.heatmap_timeline import (
+    HeatmapTimelineError,
+    list_heatmap_timeline_frames,
+    render_heatmap_timeline_video,
+    resolve_frame_path,
+)
 from services.reports import (
+    ReportGenerationError,
     get_history_report,
+    get_report_by_snapshot,
+    get_report_heatmap_snapshot,
     get_latest_report,
     latest_session,
     regenerate_report,
@@ -143,15 +152,58 @@ def reports_history():
     return jsonify(get_history_report(session, target_date))
 
 
+@app.route("/api/reports/snapshot", methods=["GET"])
+def reports_snapshot():
+    snapshot_id = request.args.get("snapshotId", "").strip()
+    report = get_report_by_snapshot(snapshot_id)
+    if not report:
+        return jsonify({"error": "未找到对应的报告快照"}), 404
+    return jsonify(report)
+
+
+@app.route("/api/reports/heatmap-snapshot", methods=["GET"])
+def reports_heatmap_snapshot():
+    snapshot_id = request.args.get("snapshotId", "").strip()
+    market = request.args.get("market", "").strip()
+    snapshot = get_report_heatmap_snapshot(snapshot_id, market)
+    if not snapshot:
+        return jsonify({"error": "未找到对应的热力图快照"}), 404
+    return jsonify(snapshot)
+
+
 @app.route("/api/reports/generate", methods=["POST"])
 def reports_generate():
     session = request.args.get("session") or latest_session()
-    return jsonify(regenerate_report(session))
+    try:
+        return jsonify(regenerate_report(session))
+    except ReportGenerationError as exc:
+        return jsonify({"error": str(exc)}), 503
 
 
 @app.route("/api/reports/schedule", methods=["GET"])
 def reports_schedule():
     return jsonify({"timezone": "Asia/Shanghai", "schedule": report_schedule()})
+
+
+@app.route("/api/heatmap-timeline/frames", methods=["GET"])
+def heatmap_timeline_frames():
+    market = request.args.get("market", "CN")
+    target_date = request.args.get("date", "")
+    try:
+        return jsonify(list_heatmap_timeline_frames(market, target_date))
+    except HeatmapTimelineError as exc:
+        return jsonify({"error": str(exc)}), 422
+
+
+@app.route("/api/heatmap-timeline/frame", methods=["GET"])
+def heatmap_timeline_frame():
+    market = request.args.get("market", "")
+    target_date = request.args.get("date", "")
+    filename = request.args.get("filename", "")
+    try:
+        return send_file(resolve_frame_path(market, target_date, filename), mimetype="image/png")
+    except HeatmapTimelineError as exc:
+        return jsonify({"error": str(exc)}), 404
 
 
 def _codex_report_authorized() -> tuple[bool, str]:
@@ -205,7 +257,28 @@ def codex_reports_generate():
         status = 503 if not os.getenv("CODEX_REPORT_API_TOKEN", "").strip() else 401
         return jsonify({"error": message}), status
     report_session = request.args.get("session") or latest_session()
-    return jsonify(regenerate_report(report_session))
+    try:
+        return jsonify(regenerate_report(report_session))
+    except ReportGenerationError as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/api/codex/reports/heatmap-timeline/render", methods=["POST"])
+def codex_render_heatmap_timeline():
+    authorized, message = _codex_report_authorized()
+    if not authorized:
+        status = 503 if not os.getenv("CODEX_REPORT_API_TOKEN", "").strip() else 401
+        return jsonify({"error": message}), status
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = render_heatmap_timeline_video(
+            str(payload.get("market") or ""),
+            str(payload.get("date") or ""),
+            float(payload.get("fps") or 2),
+        )
+        return jsonify(result)
+    except (TypeError, ValueError, HeatmapTimelineError) as exc:
+        return jsonify({"error": str(exc)}), 422
 
 
 @app.route("/api/news", methods=["GET"])

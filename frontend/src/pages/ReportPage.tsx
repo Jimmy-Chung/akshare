@@ -117,21 +117,39 @@ function RankingLevel({
 }
 
 export default function ReportPage() {
-  const requestedSession = new URLSearchParams(window.location.search).get('session')
+  const searchParams = new URLSearchParams(window.location.search)
+  const requestedSession = searchParams.get('session')
+  const requestedSnapshotId = searchParams.get('snapshotId') || ''
   const initialSession: SessionKey = (
     requestedSession === 'midday'
     || requestedSession === 'close'
     || requestedSession === 'us-night'
   ) ? requestedSession : 'morning'
   const [session, setSession] = useState<SessionKey>(initialSession)
+  const [snapshotId, setSnapshotId] = useState(requestedSnapshotId)
   const [report, setReport] = useState<SessionReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [regenerating, setRegenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const loadReport = async (targetSession?: SessionKey, regenerate = false) => {
-    const params = targetSession ? `?session=${encodeURIComponent(targetSession)}` : ''
-    const url = regenerate ? `/api/reports/generate${params}` : `/api/reports/latest${params}`
+  const loadReport = async ({
+    targetSession,
+    regenerate = false,
+    targetSnapshotId = snapshotId,
+  }: {
+    targetSession?: SessionKey
+    regenerate?: boolean
+    targetSnapshotId?: string
+  } = {}) => {
+    const params = new URLSearchParams()
+    if (targetSession) params.set('session', targetSession)
+    if (!regenerate && targetSnapshotId) params.set('snapshotId', targetSnapshotId)
+    const query = params.toString()
+    const url = regenerate
+      ? `/api/reports/generate${query ? `?${query}` : ''}`
+      : targetSnapshotId
+        ? `/api/reports/snapshot?snapshotId=${encodeURIComponent(targetSnapshotId)}`
+        : `/api/reports/latest${query ? `?${query}` : ''}`
     regenerate ? setRegenerating(true) : setLoading(true)
     try {
       const payload = await requestJson<SessionReport>(url, {
@@ -139,6 +157,7 @@ export default function ReportPage() {
       })
       setReport(payload)
       setSession(payload.session)
+      setSnapshotId(payload.snapshotId)
       setError(null)
     } catch (err) {
       setError(formatError(err))
@@ -149,7 +168,10 @@ export default function ReportPage() {
   }
 
   useEffect(() => {
-    loadReport(initialSession)
+    void loadReport({
+      targetSession: initialSession,
+      targetSnapshotId: requestedSnapshotId,
+    })
   }, [])
 
   const groups: MarketIndexGroup[] = (report?.majorMarkets ?? []).map((group) => ({
@@ -177,7 +199,8 @@ export default function ReportPage() {
             value={session}
             onChange={(next) => {
               setSession(next)
-              void loadReport(next)
+              setSnapshotId('')
+              void loadReport({ targetSession: next, targetSnapshotId: '' })
             }}
             disabled={loading}
           />
@@ -185,7 +208,10 @@ export default function ReportPage() {
             <button
               type="button"
               className="ghost-button"
-              onClick={() => loadReport(session, true)}
+              onClick={() => {
+                setSnapshotId('')
+                void loadReport({ targetSession: session, regenerate: true, targetSnapshotId: '' })
+              }}
               disabled={regenerating}
             >
               {regenerating ? '生成中' : '重新生成'}
@@ -206,7 +232,8 @@ export default function ReportPage() {
               className={item.session === session ? 'report-schedule-card is-active' : 'report-schedule-card'}
               onClick={() => {
                 setSession(item.session)
-                void loadReport(item.session)
+                setSnapshotId('')
+                void loadReport({ targetSession: item.session, targetSnapshotId: '' })
               }}
             >
               <span>{item.time}</span>
@@ -217,7 +244,12 @@ export default function ReportPage() {
         </div>
       </section>
 
-      {error && !report ? <InlineError message={error} onRetry={() => loadReport(session)} /> : null}
+      {error && !report ? (
+        <InlineError
+          message={error}
+          onRetry={() => loadReport({ targetSession: session, targetSnapshotId: snapshotId })}
+        />
+      ) : null}
 
       {loading && !report ? (
         <SkeletonBlocks blocks={4} height={180} />
@@ -257,6 +289,7 @@ export default function ReportPage() {
             kicker="Major Market Indices"
             preferredCodes={preferredCodes}
             exportFilenamePrefix={session}
+            reportMode
           />
 
           <section className="surface-card">
@@ -288,6 +321,7 @@ export default function ReportPage() {
                     exportFilenamePrefix={session}
                     reportMode
                     generatedAt={report.generatedAt}
+                    snapshotId={report.snapshotId}
                   />
                 </section>
               ))}
@@ -305,7 +339,12 @@ export default function ReportPage() {
         </>
       )}
 
-      {error && report ? <InlineError message={`刷新失败：${error}`} onRetry={() => loadReport(session)} /> : null}
+      {error && report ? (
+        <InlineError
+          message={`刷新失败：${error}`}
+          onRetry={() => loadReport({ targetSession: session, targetSnapshotId: snapshotId })}
+        />
+      ) : null}
     </div>
   )
 }

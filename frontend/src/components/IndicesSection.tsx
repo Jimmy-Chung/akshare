@@ -20,6 +20,7 @@ interface IndicesSectionProps {
   kicker?: string
   preferredCodes?: Record<string, string>
   exportFilenamePrefix?: string
+  reportMode?: boolean
 }
 
 export default function IndicesSection({
@@ -29,6 +30,7 @@ export default function IndicesSection({
   kicker = 'Cross Market Indices',
   preferredCodes = {},
   exportFilenamePrefix = '',
+  reportMode = false,
 }: IndicesSectionProps) {
   const [selectedCodes, setSelectedCodes] = useState<Record<string, string>>({})
 
@@ -66,7 +68,15 @@ export default function IndicesSection({
       {loading ? (
         <SkeletonBlocks blocks={3} height={260} />
       ) : (
-        <div className={groups.length === 1 ? 'market-grid market-grid--single' : 'market-grid'}>
+        <div
+          className={
+            groups.length === 1
+              ? 'market-grid market-grid--single'
+              : reportMode
+                ? 'market-grid market-grid--report'
+                : 'market-grid'
+          }
+        >
           {groups.map((group) => {
             const selected =
               group.indices.find((item) => item.code === selectedCodes[group.key]) ?? group.indices[0]
@@ -113,7 +123,7 @@ export default function IndicesSection({
                     </div>
 
                     {selected ? (
-                      <div className="focus-panel">
+                      <div className={reportMode ? 'focus-panel focus-panel--report' : 'focus-panel'}>
                         <div className="chart-export-toolbar">
                           <span>附件 ID：{chartId}</span>
                           <button
@@ -127,40 +137,46 @@ export default function IndicesSection({
                             导出 PNG
                           </button>
                         </div>
-                        <div
-                          className="report-chart-card report-index-chart-card"
-                          data-chart-id={chartId}
-                        >
-                          <div className="report-chart-card__header">
-                            <div>
-                              <span>{group.title}</span>
-                              <h3>{selected.name}</h3>
-                              <small>{selected.code} · {formatDashboardTime(selected.tradeDate)}</small>
+                        <div className={reportMode ? 'report-index-export-stage' : undefined}>
+                          <div
+                            className={
+                              reportMode
+                                ? 'report-chart-card report-index-chart-card report-index-chart-card--export'
+                                : 'report-chart-card report-index-chart-card'
+                            }
+                            data-chart-id={chartId}
+                          >
+                            <div className="report-chart-card__header">
+                              <div>
+                                <span>{group.title}</span>
+                                <h3>{selected.name}</h3>
+                                <small>{selected.code} · {formatDashboardTime(selected.tradeDate)}</small>
+                              </div>
+                              <SourceBadge source={selected.source} isFallback={selected.isFallback} />
                             </div>
-                            <SourceBadge source={selected.source} isFallback={selected.isFallback} />
-                          </div>
-                          <div className="report-index-chart-card__metrics">
-                            <strong>{formatPrice(selected.price)}</strong>
-                            <span className={getTrendClass(selected.changePercent)}>
-                              {formatPercent(selected.changePercent)}
-                            </span>
-                            <span className={getTrendClass(selected.changePercent)}>
-                              {formatSignedNumber(selected.changeAmount)}
-                            </span>
-                          </div>
-                          {buildChartPoints(selected).length >= 2 ? (
-                            <LineChart
-                              data={buildChartPoints(selected)}
-                              changePercent={selected.changePercent}
-                              height={220}
-                              showTimeScale
-                            />
-                          ) : (
-                            <div className="chart-empty-state">暂无真实分时走势</div>
-                          )}
-                          <div className="report-chart-card__footer">
-                            <span>分时走势</span>
-                            <span>时间均为北京时间</span>
+                            <div className="report-index-chart-card__metrics">
+                              <strong>{formatPrice(selected.price)}</strong>
+                              <span className={getTrendClass(selected.changePercent)}>
+                                {formatPercent(selected.changePercent)}
+                              </span>
+                              <span className={getTrendClass(selected.changePercent)}>
+                                {formatSignedNumber(selected.changeAmount)}
+                              </span>
+                            </div>
+                            {buildChartPoints(selected).length >= 2 ? (
+                              <LineChart
+                                data={buildChartPoints(selected)}
+                                changePercent={selected.changePercent}
+                                height={220}
+                                showTimeScale
+                              />
+                            ) : (
+                              <div className="chart-empty-state">暂无真实分时走势</div>
+                            )}
+                            <div className="report-chart-card__footer">
+                              <span>分时走势</span>
+                              <span>时间均为北京时间</span>
+                            </div>
                           </div>
                         </div>
                       </div>

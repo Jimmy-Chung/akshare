@@ -85,6 +85,7 @@ interface LongbridgeSectorHeatmapProps {
   exportFilenamePrefix?: string
   reportMode?: boolean
   generatedAt?: string
+  snapshotId?: string
 }
 
 const MARKET_TABS: Array<{ key: MarketKey; label: string }> = [
@@ -97,6 +98,12 @@ const SIZE_MODES: Array<{ key: SizeMode; label: string }> = [
   { key: 'marketValue', label: '市值' },
   { key: 'changePercent', label: '板块涨幅' },
 ]
+
+const REPORT_EXPORT_WIDTH = 3200
+const REPORT_EXPORT_HEADER_HEIGHT = 190
+const REPORT_EXPORT_CHART_HEIGHT = 1800
+const REPORT_EXPORT_ANNOTATION_HEIGHT = 620
+const REPORT_EXPORT_FOOTER_HEIGHT = 82
 
 function heatColor(changePercent: number) {
   const intensity = Math.min(Math.abs(changePercent) / 8, 1)
@@ -117,12 +124,42 @@ function heatmapSize(
   return marketValue && marketValue > 0 ? marketValue : 1
 }
 
+function drawWrappedText(
+  context: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+  maxLines: number,
+) {
+  let line = ''
+  let lineCount = 0
+  for (const char of text) {
+    const candidate = `${line}${char}`
+    if (context.measureText(candidate).width <= maxWidth || !line) {
+      line = candidate
+      continue
+    }
+    context.fillText(line, x, y + lineCount * lineHeight)
+    line = char
+    lineCount += 1
+    if (lineCount >= maxLines) return lineCount
+  }
+  if (line && lineCount < maxLines) {
+    context.fillText(line, x, y + lineCount * lineHeight)
+    lineCount += 1
+  }
+  return lineCount
+}
+
 export default function LongbridgeSectorHeatmap({
   market: controlledMarket,
   showMarketTabs = true,
   exportFilenamePrefix = '',
   reportMode = false,
   generatedAt,
+  snapshotId = '',
 }: LongbridgeSectorHeatmapProps) {
   const [internalMarket, setInternalMarket] = useState<MarketKey>('CN')
   const market = controlledMarket ?? internalMarket
@@ -146,8 +183,14 @@ export default function LongbridgeSectorHeatmap({
     setDrillIndustryCode('')
     setSelectedStockCode('')
     try {
+      const query = new URLSearchParams({ market: target })
+      if (!reportMode || !snapshotId) query.set('summary', '1')
+      if (reportMode && snapshotId) query.set('snapshotId', snapshotId)
+      const url = reportMode && snapshotId
+        ? `/api/reports/heatmap-snapshot?${query}`
+        : `/api/sector-heatmap?${query}`
       const payload = await requestJson<SectorHeatmapSummary>(
-        `/api/sector-heatmap?market=${target}&summary=1`,
+        url,
       )
       if (requestId !== requestSequence.current) return
       setSummary(payload)
@@ -187,8 +230,8 @@ export default function LongbridgeSectorHeatmap({
   }
 
   useEffect(() => {
-    loadSummary(market)
-  }, [market])
+    void loadSummary(market)
+  }, [market, reportMode, snapshotId])
 
   const industryDetail = drillIndustryCode
     ? detailCache[`${market}:${drillIndustryCode}`]
@@ -196,6 +239,16 @@ export default function LongbridgeSectorHeatmap({
   const selectedStock = industryDetail?.stocks.find((item) => item.code === selectedStockCode)
     ?? industryDetail?.stocks[0]
   const marketLabel = MARKET_TABS.find((item) => item.key === market)?.label ?? market
+  const reportAnnotationGroups = useMemo(() => (
+    (summary?.groups ?? []).map((group) => ({
+      name: group.name,
+      changePercent: group.changePercent,
+      industries: group.industries.map((industry) => ({
+        name: industry.name,
+        changePercent: industry.changePercent,
+      })),
+    }))
+  ), [summary])
 
   const chartOption = useMemo<EChartsOption>(() => {
     const isDrilled = Boolean(industryDetail)
@@ -242,17 +295,17 @@ export default function LongbridgeSectorHeatmap({
             if (!raw) return params.name
             return `${raw.item.name}\n${formatPercent(raw.item.changePercent)}`
           },
-          overflow: 'truncate',
-          fontSize: reportMode ? 16 : 12,
+          overflow: reportMode ? 'breakAll' : 'truncate',
+          fontSize: reportMode ? 18 : 12,
           fontWeight: reportMode ? 600 : 400,
-          lineHeight: reportMode ? 23 : 18,
+          lineHeight: reportMode ? 24 : 18,
         },
         upperLabel: {
           show: true,
-          height: reportMode ? 48 : 38,
+          height: reportMode ? 58 : 38,
           color: '#334155',
           fontWeight: 700,
-          fontSize: reportMode ? 20 : 12,
+          fontSize: reportMode ? 24 : 12,
           formatter: (params: any) => {
             const raw = params.data?.raw as { kind: 'group'; item: IndustryGroup } | undefined
             if (!raw || raw.kind !== 'group') return params.name
@@ -267,11 +320,11 @@ export default function LongbridgeSectorHeatmap({
         levels: [
           {
             itemStyle: { borderColor: '#cbd5e1', borderWidth: 4, gapWidth: 4 },
-            upperLabel: { show: true, height: reportMode ? 48 : 30 },
+            upperLabel: { show: true, height: reportMode ? 58 : 30 },
           },
           {
             itemStyle: { borderColor: '#e2e8f0', borderWidth: 3, gapWidth: 3 },
-            upperLabel: { show: true, height: reportMode ? 42 : 27 },
+            upperLabel: { show: true, height: reportMode ? 52 : 27 },
           },
           {
             itemStyle: { borderColor: '#fff', borderWidth: 1, gapWidth: 1 },
@@ -321,32 +374,34 @@ export default function LongbridgeSectorHeatmap({
     const sourceCanvas = instance?.getDom().querySelector('canvas')
     if (!sourceCanvas || !summary) return
 
-    const width = 1440
-    const headerHeight = 142
-    const chartHeight = 980
-    const footerHeight = 64
+    const width = REPORT_EXPORT_WIDTH
+    const headerHeight = REPORT_EXPORT_HEADER_HEIGHT
+    const chartHeight = REPORT_EXPORT_CHART_HEIGHT
+    const annotationHeight = REPORT_EXPORT_ANNOTATION_HEIGHT
+    const footerHeight = REPORT_EXPORT_FOOTER_HEIGHT
     const pixelRatio = 1
     const canvas = document.createElement('canvas')
+    const totalHeight = headerHeight + chartHeight + annotationHeight + footerHeight
     canvas.width = width * pixelRatio
-    canvas.height = (headerHeight + chartHeight + footerHeight) * pixelRatio
+    canvas.height = totalHeight * pixelRatio
     const context = canvas.getContext('2d')
     if (!context) return
 
     context.scale(pixelRatio, pixelRatio)
     context.fillStyle = '#ffffff'
-    context.fillRect(0, 0, width, headerHeight + chartHeight + footerHeight)
+    context.fillRect(0, 0, width, totalHeight)
     context.fillStyle = '#64748b'
-    context.font = '24px sans-serif'
-    context.fillText(`${marketLabel}市场`, 28, 36)
+    context.font = '34px sans-serif'
+    context.fillText(`${marketLabel}市场`, 36, 42)
     context.fillStyle = '#111827'
-    context.font = '700 34px sans-serif'
-    context.fillText(`${marketLabel}全量一级分类与二级行业热力图`, 28, 82)
+    context.font = '700 50px sans-serif'
+    context.fillText(`${marketLabel}全量一级分类与二级行业热力图`, 36, 106)
     context.fillStyle = '#64748b'
-    context.font = '20px sans-serif'
+    context.font = '26px sans-serif'
     context.fillText(
-      '全量可读模式 · 面积按涨跌幅绝对值并设置最小可视面积 · 颜色表示涨跌方向',
-      28,
-      116,
+      '放大导出模式 · 使用 ECharts 原生 treemap 布局 · 面积按涨跌幅绝对值并设置最小可视面积 · 颜色表示涨跌方向',
+      36,
+      148,
     )
 
     const legends = [
@@ -355,27 +410,99 @@ export default function LongbridgeSectorHeatmap({
       { label: '上涨', color: '#e5484d' },
     ]
     legends.forEach((item, index) => {
-      const x = 1138 + index * 92
+      const x = width - 454 + index * 138
       context.fillStyle = item.color
-      context.fillRect(x, 26, 18, 18)
+      context.fillRect(x, 36, 26, 26)
       context.fillStyle = '#475569'
-      context.font = '18px sans-serif'
-      context.fillText(item.label, x + 26, 42)
+      context.font = '24px sans-serif'
+      context.fillText(item.label, x + 38, 58)
     })
 
-    context.drawImage(sourceCanvas, 14, headerHeight, width - 28, chartHeight)
+    context.drawImage(sourceCanvas, 18, headerHeight, width - 36, chartHeight)
+
+    const annotationTop = headerHeight + chartHeight + 24
+    context.fillStyle = '#f8fafc'
+    context.strokeStyle = '#cbd5e1'
+    context.lineWidth = 2
+    context.beginPath()
+    context.roundRect(18, annotationTop, width - 36, annotationHeight - 34, 20)
+    context.fill()
+    context.stroke()
+    context.fillStyle = '#111827'
+    context.font = '700 28px sans-serif'
+    context.fillText('完整行业标注索引', 44, annotationTop + 42)
     context.fillStyle = '#64748b'
-    context.font = '18px sans-serif'
+    context.font = '22px sans-serif'
+    context.fillText(
+      '格子内已尽量显示完整二级行业名称；小格子若因面积限制无法完整显示，可在此索引中按一级分类查找完整名称与涨跌幅。',
+      44,
+      annotationTop + 78,
+    )
+
+    const columnCount = 6
+    const columnGap = 22
+    const columnWidth = (width - 88 - columnGap * (columnCount - 1)) / columnCount
+    const annotationBottom = annotationTop + annotationHeight - 54
+    let columnIndex = 0
+    let x = 44
+    let y = annotationTop + 118
+    const moveToNextColumn = () => {
+      columnIndex += 1
+      x = 44 + columnIndex * (columnWidth + columnGap)
+      y = annotationTop + 118
+    }
+    reportAnnotationGroups.forEach((group) => {
+      const blockHeight = 26 + group.industries.length * 20 + 10
+      if (columnIndex < columnCount - 1 && y + blockHeight > annotationBottom) {
+        moveToNextColumn()
+      }
+      context.fillStyle = group.changePercent >= 0 ? '#b91c1c' : '#047857'
+      context.font = '700 18px sans-serif'
+      drawWrappedText(
+        context,
+        `${group.name} ${formatPercent(group.changePercent)}`,
+        x,
+        y,
+        columnWidth,
+        20,
+        1,
+      )
+      y += 26
+      group.industries.forEach((industry) => {
+        if (columnIndex < columnCount - 1 && y + 20 > annotationBottom) {
+          moveToNextColumn()
+        }
+        context.fillStyle = industry.changePercent >= 0 ? '#b91c1c' : '#047857'
+        context.font = '700 16px sans-serif'
+        context.fillText(formatPercent(industry.changePercent), x + columnWidth - 70, y)
+        context.fillStyle = '#334155'
+        context.font = '16px sans-serif'
+        drawWrappedText(
+          context,
+          industry.name,
+          x,
+          y,
+          columnWidth - 78,
+          18,
+          1,
+        )
+        y += 20
+      })
+      y += 10
+    })
+
+    context.fillStyle = '#64748b'
+    context.font = '22px sans-serif'
     context.fillText(
       `共 ${summary.groups.length} 个一级分类 · ${summary.industries.length} 个二级行业`,
       28,
-      headerHeight + chartHeight + 40,
+      headerHeight + chartHeight + annotationHeight + 50,
     )
     context.textAlign = 'right'
     context.fillText(
       `更新于 ${formatDashboardTime(generatedAt || summary.updatedAt)}`,
       width - 28,
-      headerHeight + chartHeight + 40,
+      headerHeight + chartHeight + annotationHeight + 50,
     )
     context.textAlign = 'left'
     downloadCanvasImage(canvas, exportFilename)
@@ -495,20 +622,50 @@ export default function LongbridgeSectorHeatmap({
                 ref={chartRef}
                 echarts={echarts}
                 option={chartOption}
-                style={{ height: reportMode ? 980 : 590, width: '100%' }}
+                style={{ height: reportMode ? REPORT_EXPORT_CHART_HEIGHT : 590, width: '100%' }}
                 onEvents={{
                   click: (params: any) => {
                     const raw = params.data?.raw as
                       | { kind: 'industry'; item: IndustryItem }
                       | { kind: 'stock'; item: StockItem }
                       | undefined
-                    if (raw?.kind === 'industry') loadIndustry(raw.item)
+                    if (reportMode) return
+                    if (raw?.kind === 'industry') void loadIndustry(raw.item)
                     if (raw?.kind === 'stock') setSelectedStockCode(raw.item.code)
                   },
                 }}
                 notMerge
               />
               </div>
+              {reportMode ? (
+                <div className="report-heatmap-annotation">
+                  <div className="report-heatmap-annotation__intro">
+                    <strong>完整行业标注索引</strong>
+                    <span>
+                      格子内已尽量显示完整二级行业名称；小格子若因面积限制无法完整显示，可在此索引中查找完整名称与涨跌幅。
+                    </span>
+                  </div>
+                  <div className="report-heatmap-annotation__grid">
+                    {reportAnnotationGroups.map((group) => (
+                      <div className="report-heatmap-annotation__group" key={group.name}>
+                        <h4 className={getTrendClass(group.changePercent)}>
+                          {group.name} {formatPercent(group.changePercent)}
+                        </h4>
+                        <ul>
+                          {group.industries.map((industry) => (
+                            <li key={`${group.name}:${industry.name}`}>
+                              <span>{industry.name}</span>
+                              <strong className={getTrendClass(industry.changePercent)}>
+                                {formatPercent(industry.changePercent)}
+                              </strong>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {reportMode ? (
                 <div className="report-chart-card__footer">
                   <span>一级分类标题包含综合涨跌幅，色块为二级行业</span>

@@ -96,6 +96,9 @@ npx vite --host 0.0.0.0 --port 3005 --strictPort
 - 前端界面: http://localhost:3005
 - 数据API: http://localhost:5001
 
+日常可从项目根目录执行 `./start.sh start`。脚本通过两个独立的 `screen` 会话承载服务，
+仅补启动缺失服务，并等待后端 API 和前端页面完成就绪；已经可用的服务不会重启。
+
 ## 主要接口
 
 | 接口 | 说明 |

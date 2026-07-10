@@ -128,6 +128,7 @@ export interface SourceSummary {
 export interface SessionReport {
   schemaVersion: number
   session: SessionKey
+  snapshotId: string
   label: string
   scheduledAt: string
   date: string
@@ -181,6 +182,21 @@ export interface SectorRankingItem {
     price?: number | null
     changePercent: number
   }
+}
+
+export interface HeatmapTimelineFrame {
+  filename: string
+  label: string
+  capturedAt: string
+  size: number
+  url: string
+}
+
+export interface HeatmapTimelineFramesResponse {
+  market: 'CN' | 'HK' | 'US'
+  date: string
+  frameCount: number
+  frames: HeatmapTimelineFrame[]
 }
 
 export interface SectorRankingPair {

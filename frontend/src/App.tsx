@@ -2,12 +2,15 @@ import { useCallback, useEffect, useState } from 'react'
 import DashboardPage from './pages/DashboardPage'
 import ReportPage from './pages/ReportPage'
 import ConnectPage from './pages/ConnectPage'
+import HeatmapTimelinePage from './pages/HeatmapTimelinePage'
 import './styles/App.css'
 
-type PageTab = 'dashboard' | 'report'
+type PageTab = 'dashboard' | 'report' | 'heatmap'
 
 const getInitialTab = (): PageTab => {
-  return window.location.hash === '#report' ? 'report' : 'dashboard'
+  if (window.location.hash === '#report') return 'report'
+  if (window.location.hash === '#heatmap') return 'heatmap'
+  return 'dashboard'
 }
 
 function App() {
@@ -25,7 +28,11 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const nextHash = activeTab === 'report' ? '#report' : '#dashboard'
+    const nextHash = activeTab === 'report'
+      ? '#report'
+      : activeTab === 'heatmap'
+        ? '#heatmap'
+        : '#dashboard'
     if (window.location.hash !== nextHash) {
       window.history.replaceState(null, '', nextHash)
     }
@@ -59,12 +66,23 @@ function App() {
             >
               日报
             </button>
+            <button
+              className={activeTab === 'heatmap' ? 'page-tab is-active' : 'page-tab'}
+              onClick={() => setActiveTab('heatmap')}
+              type="button"
+            >
+              热点图
+            </button>
           </nav>
         </div>
       </header>
 
       <main className="app-content">
-        {activeTab === 'dashboard' ? <DashboardPage /> : <ReportPage />}
+        {activeTab === 'dashboard'
+          ? <DashboardPage />
+          : activeTab === 'report'
+            ? <ReportPage />
+            : <HeatmapTimelinePage />}
       </main>
     </div>
   )
