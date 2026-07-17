@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import AiMarketAssistant from '../components/AiMarketAssistant'
 import GlobalOverviewBar from '../components/GlobalOverviewBar'
 import IndicesSection from '../components/IndicesSection'
 import SectorStateTrajectory from '../components/SectorStateTrajectory'
@@ -197,8 +196,6 @@ export default function DashboardPage() {
           refreshVersion={heatmapVersion}
         />
       </section>
-      <AiMarketAssistant />
-
       {error && data ? <InlineError message={`局部刷新失败：${error}`} onRetry={() => loadOverview(true)} /> : null}
     </div>
   )

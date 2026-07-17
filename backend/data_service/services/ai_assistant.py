@@ -30,7 +30,7 @@ PROVIDER_PRESETS: Dict[str, Dict[str, str]] = {
     "deepseek": {
         "name": "DeepSeek",
         "apiBase": "https://api.deepseek.com",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-pro",
         "keyEnvironment": "DEEPSEEK_API_KEY",
     },
     "openai": {
@@ -45,6 +45,11 @@ PROVIDER_PRESETS: Dict[str, Dict[str, str]] = {
         "model": "",
         "keyEnvironment": "AI_ASSISTANT_API_KEY",
     },
+}
+
+DEEPSEEK_MODEL_ALIASES = {
+    "deepseek-4-pro": "deepseek-v4-pro",
+    "deepseek-4-flash": "deepseek-v4-flash",
 }
 
 
@@ -78,7 +83,10 @@ def provider_catalog() -> Dict[str, Any]:
     providers = []
     for provider_id, preset in PROVIDER_PRESETS.items():
         api_base = _environment_value(provider_id, "BASE_URL") or preset["apiBase"]
-        model = _environment_value(provider_id, "MODEL") or preset["model"]
+        model = _normalize_model(
+            provider_id,
+            _environment_value(provider_id, "MODEL") or preset["model"],
+        )
         providers.append({
             "id": provider_id,
             "name": preset["name"],
@@ -101,6 +109,30 @@ def _environment_value(provider_id: str, suffix: str) -> str:
 def _environment_key(provider_id: str) -> str:
     key_name = PROVIDER_PRESETS[provider_id]["keyEnvironment"]
     return os.getenv(key_name, "").strip()
+
+
+def _normalize_model(provider_id: str, model: str) -> str:
+    normalized = model.strip()
+    if provider_id == "deepseek":
+        return DEEPSEEK_MODEL_ALIASES.get(normalized.lower(), normalized)
+    return normalized
+
+
+def _provider_error_detail(response: Any) -> str:
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except (TypeError, ValueError, requests.JSONDecodeError):
+        return ""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        detail = error.get("message") or error.get("type")
+    else:
+        detail = error
+    if not isinstance(detail, str):
+        return ""
+    return " ".join(detail.split())[:240]
 
 
 def _report_type(message: str) -> str:
@@ -210,11 +242,11 @@ def _provider_config(payload: Dict[str, Any]) -> Dict[str, str]:
         or _environment_value(provider_id, "BASE_URL")
         or preset["apiBase"]
     )
-    model = (
+    model = _normalize_model(provider_id, (
         str(payload.get("model") or "").strip()
         or _environment_value(provider_id, "MODEL")
         or preset["model"]
-    )
+    ))
     api_key = str(payload.get("apiKey") or "").strip() or _environment_key(provider_id)
     if not model:
         raise AssistantConfigurationError("请配置模型名称")
@@ -276,8 +308,11 @@ def generate_market_report(payload: Dict[str, Any], public_app_url: str) -> Dict
         data = response.json()
         content = str((((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")).strip()
     except requests.RequestException as exc:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-        suffix = f"（HTTP {status}）" if status else ""
+        upstream_response = getattr(exc, "response", None)
+        status = getattr(upstream_response, "status_code", None)
+        detail = _provider_error_detail(upstream_response)
+        detail_suffix = f"：{detail}" if detail else ""
+        suffix = f"（HTTP {status}{detail_suffix}）" if status else ""
         raise AssistantProviderError(f"Provider 请求失败{suffix}") from exc
     except (TypeError, ValueError, KeyError) as exc:
         raise AssistantProviderError("Provider 返回了无法识别的响应") from exc

@@ -56,7 +56,7 @@ LONGBRIDGE_ACCESS_TOKEN=...
 CODEX_REPORT_API_TOKEN=一个独立且足够长的随机字符串
 AI_ASSISTANT_PROVIDER=deepseek
 DEEPSEEK_API_KEY=...
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-pro
 ```
 
 后端会优先读取仓库根目录 `.env`，也兼容旧变量名 `LONGPORT_*`。

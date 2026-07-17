@@ -11,7 +11,7 @@ const FALLBACK_PROVIDERS: AiProviderDefinition[] = [
     id: 'deepseek',
     name: 'DeepSeek',
     apiBase: 'https://api.deepseek.com',
-    model: 'deepseek-chat',
+    model: 'deepseek-v4-pro',
     configured: false,
     editableEndpoint: true,
   },

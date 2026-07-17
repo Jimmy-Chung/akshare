@@ -1,9 +1,13 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from services.ai_assistant import (
     AssistantConfigurationError,
+    AssistantProviderError,
     _chat_url,
+    _normalize_model,
     _report_session,
     _report_type,
     generate_market_report,
@@ -11,6 +15,16 @@ from services.ai_assistant import (
 
 
 class AiAssistantTests(unittest.TestCase):
+    def test_deepseek_v4_alias_is_normalized(self):
+        self.assertEqual(
+            _normalize_model("deepseek", "deepseek-4-pro"),
+            "deepseek-v4-pro",
+        )
+        self.assertEqual(
+            _normalize_model("deepseek", "deepseek-4-flash"),
+            "deepseek-v4-flash",
+        )
+
     def test_report_keyword_selects_daily_or_weekly_template(self):
         self.assertEqual(_report_type("请生成日报"), "daily")
         self.assertEqual(_report_type("复盘一下本周周报"), "weekly")
@@ -49,7 +63,7 @@ class AiAssistantTests(unittest.TestCase):
             "message": "日报",
             "providerId": "deepseek",
             "apiBase": "https://api.deepseek.com",
-            "model": "deepseek-chat",
+            "model": "deepseek-4-pro",
             "apiKey": "test-key",
         }, "https://workspace-akshare.jimmy-jam.com")
 
@@ -59,10 +73,40 @@ class AiAssistantTests(unittest.TestCase):
         call = mock_post.call_args
         self.assertEqual(call.args[0], "https://api.deepseek.com/chat/completions")
         self.assertEqual(call.kwargs["headers"]["Authorization"], "Bearer test-key")
+        self.assertEqual(call.kwargs["json"]["model"], "deepseek-v4-pro")
+        self.assertEqual(result["model"], "deepseek-v4-pro")
         prompt = call.kwargs["json"]["messages"][1]["content"]
         self.assertIn("必须使用的输出格式", prompt)
         self.assertIn("结构化指数快照", prompt)
         response.raise_for_status.assert_called_once_with()
+
+    @patch("services.ai_assistant._report_context")
+    @patch("services.ai_assistant.requests.post")
+    def test_provider_error_includes_safe_upstream_message(
+        self,
+        mock_post,
+        mock_report_context,
+    ):
+        mock_report_context.return_value = [{"date": "2026-07-17"}]
+        response = Mock(status_code=400)
+        response.json.return_value = {
+            "error": {"message": "Model Not Exist", "type": "invalid_request_error"},
+        }
+        response.raise_for_status.side_effect = requests.HTTPError(response=response)
+        mock_post.return_value = response
+
+        with self.assertRaisesRegex(
+            AssistantProviderError,
+            "HTTP 400：Model Not Exist",
+        ):
+            generate_market_report({
+                "message": "早报",
+                "providerId": "deepseek",
+                "apiBase": "https://api.deepseek.com",
+                "model": "unknown-model",
+                "apiKey": "test-key",
+                "session": "morning",
+            }, "https://workspace-akshare.jimmy-jam.com")
 
 
 if __name__ == "__main__":

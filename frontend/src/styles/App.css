@@ -169,6 +169,27 @@
   font-weight: 600;
 }
 
+.app-primary-nav {
+  flex: 0 0 auto;
+}
+
+.app-primary-nav .page-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 108px;
+  text-decoration: none;
+}
+
+.app-view,
+.app-view > .page-layout {
+  min-width: 0;
+}
+
+.app-view[hidden] {
+  display: none;
+}
+
 .page-tab.is-active,
 .session-tab.is-active {
   background: var(--bg-panel);
@@ -212,6 +233,49 @@
 
 .page-hero--report {
   align-items: center;
+}
+
+.assistant-page__hero {
+  align-items: center;
+}
+
+.assistant-flow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.assistant-flow__step {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line-default);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.assistant-flow__step > span {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: rgba(31, 111, 235, 0.1);
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.assistant-flow__step strong {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.assistant-flow__step p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .hero-actions,
@@ -2104,6 +2168,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .assistant-flow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .report-schedule-grid,
   .report-meta-strip,
   .report-ranking-columns,
@@ -2123,6 +2191,28 @@
   .market-workspace__header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .app-topbar {
+    gap: 16px;
+    padding: 16px;
+    border-radius: 20px;
+  }
+
+  .brand-block h1 {
+    font-size: clamp(25px, 8vw, 32px);
+  }
+
+  .app-primary-nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .app-primary-nav .page-tab {
+    min-width: 0;
+    min-height: 46px;
+    padding: 0 12px;
   }
 
   .page-hero {
@@ -2147,6 +2237,10 @@
   .ai-assistant__quick-actions,
   .ai-compose .primary-button {
     width: 100%;
+  }
+
+  .assistant-flow {
+    grid-template-columns: 1fr;
   }
 
   .index-grid,
