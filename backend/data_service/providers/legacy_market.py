@@ -23,6 +23,22 @@ from .market_catalog import flattened_global_indices
 
 logger = logging.getLogger(__name__)
 
+TRADINGVIEW_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://www.tradingview.com",
+    "Referer": "https://www.tradingview.com/",
+}
+TRADINGVIEW_COLUMNS = [
+    "close",
+    "change",
+    "change_abs",
+    "open",
+    "high",
+    "low",
+    "volume",
+]
+
 A_INDEX_SYMBOLS = [
     {"name": "上证指数", "code": "000001.SH", "symbol": "sh000001"},
     {"name": "深证成指", "code": "399001.SZ", "symbol": "sz399001"},
@@ -215,6 +231,54 @@ def fetch_yahoo_indices(desired: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     return result
 
 
+def fetch_tradingview_indices(desired: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """Fetch global index quotes in one batch and map them to the app's stable codes."""
+    if not desired:
+        return []
+
+    symbol_map = {item["symbol"]: item for item in desired}
+    response = requests.post(
+        "https://scanner.tradingview.com/global/scan",
+        json={
+            "symbols": {"tickers": list(symbol_map), "query": {"types": []}},
+            "columns": TRADINGVIEW_COLUMNS,
+        },
+        headers=TRADINGVIEW_HEADERS,
+        timeout=12,
+    )
+    response.raise_for_status()
+    rows = response.json().get("data") or []
+    result: List[Dict[str, Any]] = []
+
+    for row in rows:
+        item = symbol_map.get(str(row.get("s", "")))
+        values = row.get("d") or []
+        if not item or len(values) < len(TRADINGVIEW_COLUMNS):
+            continue
+        price = safe_float(values[0], None)
+        change_percent = safe_float(values[1], 0) or 0
+        change_amount = safe_float(values[2], None)
+        if price is None:
+            continue
+        previous_close = price - change_amount if change_amount is not None else None
+        result.append({
+            "name": item["name"],
+            "code": item["code"],
+            "price": price,
+            "changePercent": change_percent,
+            "changeAmount": change_amount or 0,
+            "open": safe_float(values[3], None),
+            "high": safe_float(values[4], None),
+            "low": safe_float(values[5], None),
+            "previousClose": previous_close,
+            "volume": safe_float(values[6], None),
+            "tradeDate": "",
+            "source": "TradingView",
+            "isFallback": True,
+        })
+    return result
+
+
 def normalize_nasdaq_index(symbol: str, name: str, code: str) -> Optional[Dict[str, Any]]:
     data = request_json(
         f"https://api.nasdaq.com/api/quote/{symbol}/info",
@@ -359,6 +423,22 @@ def fetch_global_indices() -> List[Dict[str, Any]]:
     us_by_code = {item["code"]: item for item in fetch_us_indices()}
     result.extend([*a_by_code.values(), *hk_by_code.values(), *us_by_code.values()])
 
+    existing_codes = {row["code"] for row in result}
+    tradingview_items = [
+        {
+            "name": item["name"],
+            "code": item["code"],
+            "symbol": item["tradingview"],
+        }
+        for item in catalog
+        if item.get("tradingview") and item["code"] not in existing_codes
+    ]
+    try:
+        result.extend(fetch_tradingview_indices(tradingview_items))
+    except Exception as exc:
+        logger.warning("获取TradingView全球指数失败: %s", exc)
+
+    existing_codes = {row["code"] for row in result}
     yahoo_items = [
         {
             "name": item["name"],
@@ -367,7 +447,7 @@ def fetch_global_indices() -> List[Dict[str, Any]]:
         }
         for item in catalog
         if str(item.get("fallback", "")).startswith("^")
-        and item["code"] not in {row["code"] for row in result}
+        and item["code"] not in existing_codes
     ]
     result.extend(fetch_yahoo_indices(yahoo_items))
     return result

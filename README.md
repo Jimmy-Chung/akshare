@@ -1,16 +1,17 @@
 # 全球市场行情看板
 
-基于 Longbridge 主行情源 + 同花顺板块补源的内部市场看板与日报工具。
+基于 Longbridge 主行情源、统一板块快照与可配置 AI Provider 的内部市场看板。
 
 ## 当前功能
 
-- `看板` 页: 全球概览、A/HK/US 主要指数、A 股板块热力图、港美权重股、自动点评、新闻摘要
-- `日报` 页: `早盘 09:30 / 午盘 12:30 / 收盘 16:30 / 美股夜盘 22:30` 四档结构化报告
+- `看板` 页: 全球概览、A/HK/US 主要指数、板块状态轨迹与 AI 市场助手
+- 四时段采集器: 固化早报、午报、收盘报和夜报指数数据包，不读取热点图
+- AI 市场助手: 点击快捷动作或输入报告关键词，读取对应时段数据包并按固定 Markdown 模板输出
+- Provider: 支持 DeepSeek、OpenAI 和其他 OpenAI-compatible 服务
 - 行情主源: Longbridge
 - 看板板块热力图: Longbridge 行业排行（A 股 / 港股 / 美股）
 - 日报内容: 全球指数总览、时段主要市场指数、Longbridge 一级/二级行业涨跌幅前三
 - 全球市场按美洲、欧洲、亚太、南亚分组；逐项优先 Longbridge，缺失项显示备用来源标记
-- 新闻优先 Longbridge，数量不足时以 Google News 补齐并标记
 - 图表: TradingView `lightweight-charts`
 
 ## 技术栈
@@ -53,6 +54,9 @@ LONGBRIDGE_APP_KEY=...
 LONGBRIDGE_APP_SECRET=...
 LONGBRIDGE_ACCESS_TOKEN=...
 CODEX_REPORT_API_TOKEN=一个独立且足够长的随机字符串
+AI_ASSISTANT_PROVIDER=deepseek
+DEEPSEEK_API_KEY=...
+DEEPSEEK_MODEL=deepseek-chat
 ```
 
 后端会优先读取仓库根目录 `.env`，也兼容旧变量名 `LONGPORT_*`。
@@ -73,22 +77,8 @@ OAuth Token 默认保存在 `~/.longbridge/openapi/tokens/<client_id>`。Docker 
 
 ## 启动方式
 
-当前建议先手动启动，不依赖 `start.sh`：
-
-1. 启动后端
-
 ```bash
-cd /Users/jimmychung/Desktop/finogeeks/akshare/backend/data_service
-python3 -m pip install -r requirements.txt
-python3 -c "from waitress import serve; from app import app; serve(app, host='0.0.0.0', port=5001)"
-```
-
-2. 启动前端
-
-```bash
-cd /Users/jimmychung/Desktop/finogeeks/akshare/frontend
-npm install
-npx vite --host 0.0.0.0 --port 3005 --strictPort
+./start.sh start
 ```
 
 ## 访问地址
@@ -96,14 +86,15 @@ npx vite --host 0.0.0.0 --port 3005 --strictPort
 - 前端界面: http://localhost:3005
 - 数据API: http://localhost:5001
 
-日常可从项目根目录执行 `./start.sh start`。脚本通过两个独立的 `screen` 会话承载服务，
-仅补启动缺失服务，并等待后端 API 和前端页面完成就绪；已经可用的服务不会重启。
+`./start.sh` 统一管理前端、后端、CN/HK/US 三个板块快照 watcher 以及四时段报告采集器。
 
 ## 主要接口
 
 | 接口 | 说明 |
 |------|------|
 | `/api/dashboard/overview` | Dashboard 聚合数据 |
+| `/api/assistant/providers` | 可用 Provider 与默认配置（不返回密钥） |
+| `/api/assistant/chat` | 基于统一市场快照生成日报或周报 |
 | `/api/reports/latest` | 最新时段日报 |
 | `/api/reports/history` | 历史日报 |
 | `/api/reports/generate` | 手动重生成日报 |

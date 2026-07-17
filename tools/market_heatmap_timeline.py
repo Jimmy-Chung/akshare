@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import fcntl
 import json
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ import sys
 import time
 import urllib.parse
 from dataclasses import dataclass
-from datetime import date, datetime, time as day_time
+from datetime import date, datetime, time as day_time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -38,6 +39,7 @@ MARKET_TRADING_WINDOWS = {
     "US": [(day_time(9, 30), day_time(16, 0))],
 }
 WEEKEND_DAYS = {5, 6}
+SYSTEM_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,24 @@ def generate_report(api_url: str, session: str) -> dict[str, Any]:
     return payload
 
 
+def generate_heatmap_snapshot(
+    api_url: str,
+    market: str,
+    trigger: str,
+    scheduled_at: str,
+) -> dict[str, Any]:
+    response = requests.post(
+        f"{api_url}/api/heatmap-snapshots/generate",
+        json={"market": market, "trigger": trigger, "scheduledAt": scheduled_at},
+        timeout=150,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("snapshotId"):
+        raise RuntimeError("heatmap snapshot did not include snapshotId")
+    return payload
+
+
 def target_from_report(report: dict[str, Any], market: str) -> CaptureTarget:
     normalized_market = market.upper()
     for export in report.get("chartExports", []):
@@ -142,9 +162,32 @@ def target_from_snapshot(session: str, snapshot_id: str, market: str) -> Capture
     )
 
 
-def output_paths(output_dir: Path, target: CaptureTarget, captured_at: datetime) -> tuple[Path, Path]:
-    date_key = captured_at.strftime("%Y-%m-%d")
-    stamp = captured_at.strftime("%H%M%S")
+def target_from_heatmap_snapshot(snapshot: dict[str, Any]) -> CaptureTarget:
+    market = str(snapshot["market"]).upper()
+    snapshot_id = str(snapshot["snapshotId"])
+    chart_id = f"heatmap-{market.lower()}"
+    return CaptureTarget(
+        market=market,
+        session=str(snapshot.get("trigger") or "scheduled"),
+        snapshot_id=snapshot_id,
+        page_url=(
+            f"/?market={market}&heatmapSnapshotId={snapshot_id}&heatmapExport=1#dashboard"
+        ),
+        chart_id=chart_id,
+        export_button_id=chart_id,
+        filename=f"{snapshot_id}-{chart_id}.png",
+    )
+
+
+def output_paths(
+    output_dir: Path,
+    target: CaptureTarget,
+    captured_at: datetime,
+    target_date: str = "",
+) -> tuple[Path, Path]:
+    market_time = captured_at.astimezone(MARKET_TIMEZONES[target.market])
+    date_key = target_date or market_time.strftime("%Y-%m-%d")
+    stamp = market_time.strftime("%H%M%S")
     frame_dir = output_dir / target.market / date_key / "frames"
     meta_dir = output_dir / target.market / date_key / "metadata"
     frame_dir.mkdir(parents=True, exist_ok=True)
@@ -178,6 +221,22 @@ def is_market_open(market: str, moment: datetime | None = None) -> tuple[bool, s
         f"{MARKET_LABELS.get(normalized_market, normalized_market)} closed: "
         f"{local_now.isoformat(timespec='seconds')} local, trading windows {window_text}"
     )
+
+
+def capture_check_moment(
+    market: str,
+    trigger: str,
+    scheduled_at: str,
+) -> datetime | None:
+    if trigger not in {"scheduled", "session-close"} or not scheduled_at:
+        return None
+    try:
+        moment = datetime.fromisoformat(scheduled_at)
+    except ValueError as exc:
+        raise ValueError(f"invalid scheduledAt: {scheduled_at}") from exc
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=MARKET_TIMEZONES[market.upper()])
+    return moment
 
 
 async def export_heatmap_png(
@@ -329,67 +388,113 @@ def new_chrome_tab(port: int, url: str) -> str:
 
 def capture_once(args: argparse.Namespace) -> dict[str, Any]:
     if not args.force:
-        open_now, reason = is_market_open(args.market)
+        check_moment = capture_check_moment(
+            args.market,
+            args.trigger,
+            args.scheduled_at,
+        )
+        open_now, reason = is_market_open(args.market, check_moment)
         if not open_now:
             return {
                 "skipped": True,
                 "reason": reason,
                 "market": args.market,
                 "session": args.session,
-                "capturedAt": datetime.now().isoformat(timespec="seconds"),
+                "capturedAt": datetime.now(SYSTEM_TIMEZONE).isoformat(timespec="seconds"),
             }
 
     ensure_services(args.app_url, args.api_url)
-    captured_at = datetime.now()
-    if args.snapshot_id:
-        target = target_from_snapshot(args.session, args.snapshot_id, args.market)
-        report = {"snapshotId": args.snapshot_id, "session": args.session}
-    else:
-        report = generate_report(args.api_url, args.session)
-        target = target_from_report(report, args.market)
-
-    destination, metadata_path = output_paths(args.output_dir, target, captured_at)
-    profile_dir = args.output_dir / f".chrome-profile-{args.market.lower()}-{args.port}"
-    chrome = start_chrome(args.chrome, args.port, profile_dir)
+    captured_at = datetime.now(SYSTEM_TIMEZONE)
+    lock_dir = args.output_dir / ".locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_handle = (lock_dir / f"{args.market.lower()}.lock").open("w")
+    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
     try:
-        wait_for_chrome(args.port)
-        websocket_url = new_chrome_tab(args.port, f"{args.app_url}{target.page_url}")
-        export_payload = asyncio.run(
-            export_heatmap_png(
-                websocket_url,
-                args.app_url,
-                target,
-                destination,
-                args.wait_ms,
-            )
+        snapshot = generate_heatmap_snapshot(
+            args.api_url,
+            args.market,
+            args.trigger,
+            args.scheduled_at,
         )
-    finally:
-        chrome.terminate()
-        try:
-            chrome.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            chrome.kill()
+        target = target_from_heatmap_snapshot(snapshot)
+        existing_image = snapshot.get("image") or {}
+        if (
+            existing_image.get("path")
+            and Path(existing_image["path"]).exists()
+            and not args.force
+        ):
+            return {
+                "reused": True,
+                "market": args.market,
+                "snapshotId": snapshot["snapshotId"],
+                "scheduledAt": snapshot.get("scheduledAt"),
+                "path": existing_image["path"],
+                "png": existing_image,
+            }
 
-    png = validate_png(destination, args.min_width, args.min_height)
-    metadata = {
-        "capturedAt": captured_at.isoformat(timespec="seconds"),
-        "market": target.market,
-        "marketLabel": MARKET_LABELS.get(target.market, target.market),
-        "session": target.session,
-        "snapshotId": target.snapshot_id,
-        "pageUrl": target.page_url,
-        "chartId": target.chart_id,
-        "path": str(destination),
-        "png": png,
-        "reportGeneratedAt": report.get("generatedAt"),
-        "export": {
-            key: value
-            for key, value in export_payload.items()
-            if key not in {"base64"}
-        },
-    }
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    return metadata
+        destination, metadata_path = output_paths(args.output_dir, target, captured_at, args.target_date)
+        profile_dir = args.output_dir / f".chrome-profile-{args.market.lower()}-{args.port}"
+        chrome = start_chrome(args.chrome, args.port, profile_dir)
+        try:
+            wait_for_chrome(args.port)
+            websocket_url = new_chrome_tab(args.port, f"{args.app_url}{target.page_url}")
+            export_payload = asyncio.run(
+                export_heatmap_png(
+                    websocket_url,
+                    args.app_url,
+                    target,
+                    destination,
+                    args.wait_ms,
+                )
+            )
+        finally:
+            chrome.terminate()
+            try:
+                chrome.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                chrome.kill()
+
+        try:
+            png = validate_png(destination, args.min_width, args.min_height)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        response = requests.post(
+            f"{args.api_url}/api/heatmap-snapshots/image",
+            json={
+                "snapshotId": target.snapshot_id,
+                "path": str(destination),
+                "width": png["width"],
+                "height": png["height"],
+                "size": destination.stat().st_size,
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        metadata = {
+            "capturedAt": captured_at.isoformat(timespec="seconds"),
+            "marketCapturedAt": captured_at.astimezone(MARKET_TIMEZONES[target.market]).isoformat(timespec="seconds"),
+            "scheduledAt": snapshot.get("scheduledAt"),
+            "trigger": snapshot.get("trigger"),
+            "market": target.market,
+            "marketLabel": MARKET_LABELS.get(target.market, target.market),
+            "session": target.session,
+            "snapshotId": target.snapshot_id,
+            "pageUrl": target.page_url,
+            "chartId": target.chart_id,
+            "path": str(destination),
+            "png": png,
+            "export": {
+                key: value
+                for key, value in export_payload.items()
+                if key not in {"base64"}
+            },
+        }
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        return metadata
+    finally:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        lock_handle.close()
 
 
 def render_video(args: argparse.Namespace) -> Path:
@@ -427,14 +532,70 @@ def render_video(args: argparse.Namespace) -> Path:
     return output_path
 
 
+def fetch_market_calendar(api_url: str, market: str, target_date: date) -> dict[str, Any]:
+    response = requests.get(
+        f"{api_url}/api/market-calendar",
+        params={"market": market, "start": target_date.isoformat(), "end": target_date.isoformat()},
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def calendar_slots(market: str, target_date: date, calendar: dict[str, Any]) -> list[datetime]:
+    if target_date.isoformat() not in set(calendar.get("tradingDays") or []):
+        return []
+    timezone = MARKET_TIMEZONES[market]
+    sessions = list(calendar.get("sessions") or [])
+    if target_date.isoformat() in set(calendar.get("halfTradingDays") or []):
+        half_close = {"CN": "11:30", "HK": "12:00", "US": "13:00"}[market]
+        sessions = [{"open": sessions[0]["open"], "close": half_close}] if sessions else []
+    slots: set[datetime] = set()
+    for session in sessions:
+        opening = datetime.combine(target_date, day_time.fromisoformat(session["open"]), timezone)
+        closing = datetime.combine(target_date, day_time.fromisoformat(session["close"]), timezone)
+        current = opening
+        while current <= closing:
+            slots.add(current)
+            current += timedelta(minutes=30)
+        slots.add(closing)
+    return sorted(slots)
+
+
 def watch(args: argparse.Namespace) -> None:
+    executed: set[str] = set()
+    calendar_date: date | None = None
+    calendar: dict[str, Any] = {}
     while True:
-        try:
-            metadata = capture_once(args)
-            print(json.dumps({"ok": not metadata.get("skipped"), **metadata}, ensure_ascii=False), flush=True)
-        except Exception as exc:
-            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr, flush=True)
-        time.sleep(args.interval_seconds)
+        now = datetime.now(MARKET_TIMEZONES[args.market])
+        if calendar_date != now.date():
+            try:
+                calendar = fetch_market_calendar(args.api_url, args.market, now.date())
+                calendar_date = now.date()
+                executed.clear()
+            except Exception as exc:
+                print(json.dumps({"ok": False, "error": f"calendar: {exc}"}), file=sys.stderr, flush=True)
+                time.sleep(60)
+                continue
+        slots = calendar_slots(args.market, now.date(), calendar)
+        due = next(
+            (
+                slot for slot in slots
+                if slot.isoformat() not in executed
+                and 0 <= (now - slot).total_seconds() <= args.grace_seconds
+            ),
+            None,
+        )
+        if due:
+            args.scheduled_at = due.isoformat(timespec="seconds")
+            args.trigger = "session-close" if due == slots[-1] else "scheduled"
+            try:
+                metadata = capture_once(args)
+                executed.add(due.isoformat())
+                print(json.dumps({"ok": True, **metadata}, ensure_ascii=False), flush=True)
+            except Exception as exc:
+                print(json.dumps({"ok": False, "scheduledAt": args.scheduled_at, "error": str(exc)}, ensure_ascii=False), file=sys.stderr, flush=True)
+        time.sleep(args.poll_seconds)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -451,11 +612,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-width", type=int, default=3000)
     parser.add_argument("--min-height", type=int, default=2600)
     parser.add_argument("--force", action="store_true", help="Capture even when the market is outside regular trading hours.")
+    parser.add_argument("--trigger", default="scheduled", choices=["scheduled", "session-close", "manual"])
+    parser.add_argument("--scheduled-at", default="")
+    parser.add_argument("--target-date", default="", help="Override the output timeline date for manual backfills.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("capture", help="Capture one heatmap frame.")
     watch_parser = subparsers.add_parser("watch", help="Capture a heatmap frame repeatedly.")
-    watch_parser.add_argument("--interval-seconds", type=int, default=1800)
+    watch_parser.add_argument("--poll-seconds", type=int, default=10)
+    watch_parser.add_argument("--grace-seconds", type=int, default=180)
     render_parser = subparsers.add_parser("render", help="Render captured frames into MP4.")
     render_parser.add_argument("--date", default="")
     render_parser.add_argument("--fps", type=float, default=2.0)

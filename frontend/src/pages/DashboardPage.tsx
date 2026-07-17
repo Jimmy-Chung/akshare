@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react'
+import AiMarketAssistant from '../components/AiMarketAssistant'
 import GlobalOverviewBar from '../components/GlobalOverviewBar'
 import IndicesSection from '../components/IndicesSection'
-import LongbridgeSectorHeatmap from '../components/LongbridgeSectorHeatmap'
-import NewsDigestPanel from '../components/NewsDigestPanel'
+import SectorStateTrajectory from '../components/SectorStateTrajectory'
 import { InlineError } from '../components/StateBlocks'
-import WeightStocksSection from '../components/WeightStocksSection'
 import type { DashboardOverview, MarketIndexGroup } from '../types/market'
 import { formatError, requestJson } from '../utils/api'
 import { formatDashboardTime } from '../utils/market'
@@ -19,9 +18,13 @@ const MARKET_TABS: Array<{ key: DashboardMarket; label: string }> = [
 
 export default function DashboardPage() {
   const exportSession = new URLSearchParams(window.location.search).get('session') || ''
+  const heatmapSnapshotId = new URLSearchParams(window.location.search).get('heatmapSnapshotId') || ''
+  const heatmapExportMode = new URLSearchParams(window.location.search).get('heatmapExport') === '1'
   const [data, setData] = useState<DashboardOverview | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [refreshingHeatmap, setRefreshingHeatmap] = useState(false)
+  const [heatmapVersion, setHeatmapVersion] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [market, setMarket] = useState<DashboardMarket>(() => {
     const requested = new URLSearchParams(window.location.search).get('market')?.toUpperCase()
@@ -56,6 +59,19 @@ export default function DashboardPage() {
     return () => window.clearInterval(timer)
   }, [])
 
+  const refreshHeatmap = async () => {
+    setRefreshingHeatmap(true)
+    try {
+      await requestJson(`/api/heatmap-snapshots/refresh?market=${market}`, { method: 'POST' })
+      setHeatmapVersion((current) => current + 1)
+      setError(null)
+    } catch (err) {
+      setError(formatError(err))
+    } finally {
+      setRefreshingHeatmap(false)
+    }
+  }
+
   const groups: MarketIndexGroup[] = [
     {
       key: 'aShares',
@@ -80,34 +96,22 @@ export default function DashboardPage() {
     CN: {
       group: groups[0],
       title: 'A 股市场',
-      description: '集中查看 A 股主要指数、行业热力图与核心权重股。',
-      weightTitle: 'A 股核心权重股',
-      weightSubtitle: '观察消费、金融、制造与新能源龙头的市场影响力',
-      weights: data?.aWeights ?? [],
+      description: '集中查看 A 股主要指数与板块状态轨迹。',
     },
     HK: {
       group: groups[1],
       title: '港股市场',
-      description: '集中查看港股主要指数、行业热力图与核心权重股。',
-      weightTitle: '港股权重股',
-      weightSubtitle: '按市场影响力观察腾讯、阿里、美团与金融权重',
-      weights: data?.hkWeights ?? [],
+      description: '集中查看港股主要指数与板块状态轨迹。',
     },
     US: {
       group: groups[2],
       title: '美股市场',
-      description: '集中查看美股主要指数、行业热力图与核心权重股。',
-      weightTitle: '美股权重股',
-      weightSubtitle: '按市值与波动观察科技巨头与指数权重',
-      weights: data?.usWeights ?? [],
+      description: '集中查看美股主要指数与板块状态轨迹。',
     },
   } satisfies Record<DashboardMarket, {
     group: MarketIndexGroup
     title: string
     description: string
-    weightTitle: string
-    weightSubtitle: string
-    weights: DashboardOverview['hkWeights']
   }>
   const activeMarket = marketConfig[market]
 
@@ -120,7 +124,6 @@ export default function DashboardPage() {
   const fallbackCount =
     (data?.sourceSummary?.global.fallback ?? 0)
     + (data?.sourceSummary?.majorIndices.fallback ?? 0)
-    + (data?.sourceSummary?.weights.fallback ?? 0)
 
   return (
     <div className="page-layout">
@@ -128,7 +131,7 @@ export default function DashboardPage() {
         <div>
           <span className="page-hero__kicker">Dashboard</span>
           <h2>看板</h2>
-          <p>统一展示全球指数、三地核心指数、A 股板块强弱、权重股与自动点评。</p>
+          <p>统一展示全球指数、三地核心指数、板块状态轨迹与自动点评。</p>
         </div>
         <div className="hero-actions">
           <div className="source-pills">
@@ -137,12 +140,15 @@ export default function DashboardPage() {
             </span>
             <span className="pill">{longbridgeLabel}</span>
             <span className="pill">板块 Longbridge</span>
-            <span className="pill">新闻 {data?.sources?.news ?? 'rss'}</span>
+            <span className="pill">报告 AI Provider</span>
           </div>
           <div className="hero-tools">
             <span className="meta-text">最近更新 {formatDashboardTime(data?.updatedAt)}</span>
+            <button type="button" className="primary-button" onClick={refreshHeatmap} disabled={refreshingHeatmap}>
+              {refreshingHeatmap ? '生成热点图中' : '立即刷新热点图'}
+            </button>
             <button type="button" className="ghost-button" onClick={() => loadOverview(true)} disabled={refreshing}>
-              {refreshing ? '刷新中' : '刷新数据'}
+              {refreshing ? '刷新中' : '刷新指数'}
             </button>
           </div>
         </div>
@@ -182,19 +188,16 @@ export default function DashboardPage() {
           kicker="Market Indices"
           loading={loading && !data}
         />
-        <LongbridgeSectorHeatmap
+        <SectorStateTrajectory
+          key={`${market}:${heatmapVersion}:${heatmapSnapshotId}`}
           market={market}
-          showMarketTabs={false}
+          snapshotId={heatmapSnapshotId}
+          reportMode={heatmapExportMode}
           exportFilenamePrefix={exportSession}
-        />
-        <WeightStocksSection
-          title={activeMarket.weightTitle}
-          subtitle={activeMarket.weightSubtitle}
-          stocks={activeMarket.weights}
-          loading={loading && !data}
+          refreshVersion={heatmapVersion}
         />
       </section>
-      <NewsDigestPanel articles={data?.newsDigest ?? []} loading={loading && !data} />
+      <AiMarketAssistant />
 
       {error && data ? <InlineError message={`局部刷新失败：${error}`} onRetry={() => loadOverview(true)} /> : null}
     </div>

@@ -5,3 +5,4 @@ pandas>=1.3.0
 requests>=2.25.0
 waitress>=3.0.0
 longbridge>=4.3.0
+Pillow>=10.0.0
