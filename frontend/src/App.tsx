@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import DashboardPage from './pages/DashboardPage'
 import AssistantPage from './pages/AssistantPage'
+import AccessPage, { type DashboardAccessStatus } from './pages/AccessPage'
 import ReportPage from './pages/ReportPage'
 import ConnectPage from './pages/ConnectPage'
+import { formatError, requestJson } from './utils/api'
 import './styles/App.css'
 
 const isReportExportRoute = () => (
@@ -37,12 +39,36 @@ function AssistantIcon() {
 }
 
 function App() {
+  const [accessStatus, setAccessStatus] = useState<DashboardAccessStatus | null>(null)
+  const [accessError, setAccessError] = useState('')
   const [connected, setConnected] = useState(false)
   const [activeTab, setActiveTab] = useState<AppTab>(tabFromHash)
   const [visitedTabs, setVisitedTabs] = useState<Set<AppTab>>(
     () => new Set([tabFromHash()]),
   )
   const handleConnected = useCallback(() => setConnected(true), [])
+
+  const loadAccessStatus = useCallback(() => {
+    setAccessError('')
+    requestJson<DashboardAccessStatus>('/api/access/status')
+      .then(setAccessStatus)
+      .catch((error) => setAccessError(formatError(error)))
+  }, [])
+
+  useEffect(() => {
+    loadAccessStatus()
+    const handleAccessRequired = () => {
+      setConnected(false)
+      setAccessStatus((current) => ({
+        authenticated: false,
+        configured: current?.configured ?? true,
+        bypassed: false,
+        sessionDays: current?.sessionDays ?? 30,
+      }))
+    }
+    window.addEventListener('dashboard-access-required', handleAccessRequired)
+    return () => window.removeEventListener('dashboard-access-required', handleAccessRequired)
+  }, [loadAccessStatus])
 
   useEffect(() => {
     const handleHashChange = () => {
@@ -54,6 +80,17 @@ function App() {
     window.addEventListener('hashchange', handleHashChange)
     return () => window.removeEventListener('hashchange', handleHashChange)
   }, [])
+
+  if (!accessStatus?.authenticated) {
+    return (
+      <AccessPage
+        status={accessStatus}
+        initialError={accessError}
+        onAuthenticated={setAccessStatus}
+        onRetry={loadAccessStatus}
+      />
+    )
+  }
 
   if (!connected) {
     return <ConnectPage onConnected={handleConnected} />
@@ -90,6 +127,19 @@ function App() {
               AI 助手
             </a>
           </nav>
+        ) : null}
+        {!reportExportRoute && !accessStatus.bypassed ? (
+          <button
+            type="button"
+            className="ghost-button app-logout-button"
+            onClick={async () => {
+              await requestJson('/api/access/logout', { method: 'POST' })
+              setConnected(false)
+              setAccessStatus({ ...accessStatus, authenticated: false })
+            }}
+          >
+            退出
+          </button>
         ) : null}
       </header>
 

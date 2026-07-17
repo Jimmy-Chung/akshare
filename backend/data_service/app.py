@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import secrets
+import threading
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 from urllib.parse import urlencode
 
 from flask import Flask, jsonify, redirect, request, session
-from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import check_password_hash
 
 from providers import legacy_market, longbridge, longbridge_oauth, news, sectors_ths
 from providers.common import merge_preferred_rows, merge_with_lazy_fallback
@@ -72,19 +76,171 @@ def _load_flask_secret() -> str:
             return path.read_text(encoding="utf-8").strip()
 
 
+def _session_cookie_secure() -> bool:
+    configured = os.getenv("SESSION_COOKIE_SECURE", "").strip().lower()
+    if configured:
+        return configured in {"1", "true", "yes"}
+    return os.getenv("PUBLIC_APP_URL", "").strip().lower().startswith("https://")
+
+
+def _access_session_days() -> int:
+    try:
+        return min(max(int(os.getenv("DASHBOARD_ACCESS_SESSION_DAYS", "30")), 1), 365)
+    except ValueError:
+        return 30
+
+
 app = Flask(__name__)
 app.secret_key = _load_flask_secret()
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower()
-    in {"1", "true", "yes"},
+    SESSION_COOKIE_SECURE=_session_cookie_secure(),
+    PERMANENT_SESSION_LIFETIME=timedelta(days=_access_session_days()),
 )
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
-CORS(app)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+ACCESS_SESSION_KEY = "dashboard_access_version"
+ACCESS_EXEMPT_PATHS = {
+    "/api/access/status",
+    "/api/access/login",
+    "/api/access/logout",
+    "/api/system/status",
+}
+ACCESS_FAILURE_LIMIT = 5
+ACCESS_FAILURE_WINDOW_SECONDS = 15 * 60
+_ACCESS_FAILURES: Dict[str, List[float]] = {}
+_ACCESS_FAILURES_LOCK = threading.Lock()
+
+
+def _access_password_hash() -> str:
+    return os.getenv("DASHBOARD_ACCESS_PASSWORD_HASH", "").strip()
+
+
+def _access_version(password_hash: str) -> str:
+    return hashlib.sha256(password_hash.encode("utf-8")).hexdigest()
+
+
+def _loopback_request() -> bool:
+    # Vite proxies public /api requests from a loopback socket too, and the
+    # Workspace Router may rewrite Host. Cloudflare marks tunnel traffic; after
+    # excluding it, Vite's overwritten original host distinguishes local browser
+    # traffic from other reverse proxies. Direct collectors have neither header.
+    if request.headers.get("CF-Connecting-IP") or request.headers.get("CF-Ray"):
+        return False
+    request_host = request.host.rsplit(":", 1)[0].strip("[]")
+    if request.remote_addr != "127.0.0.1":
+        return False
+    original_host = request.headers.get("X-Dashboard-Original-Host", "")
+    if original_host:
+        original_hostname = original_host.rsplit(":", 1)[0].strip("[]")
+        return original_hostname in {"localhost", "127.0.0.1"}
+    return request_host == "127.0.0.1"
+
+
+def _dashboard_access_granted() -> bool:
+    password_hash = _access_password_hash()
+    stored_version = str(session.get(ACCESS_SESSION_KEY) or "")
+    return bool(
+        password_hash
+        and stored_version
+        and secrets.compare_digest(stored_version, _access_version(password_hash))
+    )
+
+
+def _access_failure_state(client_key: str, *, record: bool = False) -> tuple[bool, int]:
+    now = time.monotonic()
+    with _ACCESS_FAILURES_LOCK:
+        attempts = [
+            value
+            for value in _ACCESS_FAILURES.get(client_key, [])
+            if now - value < ACCESS_FAILURE_WINDOW_SECONDS
+        ]
+        if record:
+            attempts.append(now)
+        if attempts:
+            _ACCESS_FAILURES[client_key] = attempts
+        else:
+            _ACCESS_FAILURES.pop(client_key, None)
+        return len(attempts) >= ACCESS_FAILURE_LIMIT, len(attempts)
+
+
+def _clear_access_failures(client_key: str) -> None:
+    with _ACCESS_FAILURES_LOCK:
+        _ACCESS_FAILURES.pop(client_key, None)
+
+
+@app.before_request
+def require_dashboard_access():
+    if request.method == "OPTIONS" or not request.path.startswith("/api/"):
+        return None
+    if _loopback_request() or request.path in ACCESS_EXEMPT_PATHS:
+        return None
+    if request.path.startswith("/api/codex/"):
+        return None
+    if _dashboard_access_granted():
+        return None
+    return jsonify({
+        "error": "请先输入看板访问凭证",
+        "code": "dashboard_access_required",
+    }), 401
+
+
+@app.route("/api/access/status", methods=["GET"])
+def dashboard_access_status():
+    bypassed = _loopback_request()
+    return jsonify({
+        "authenticated": bypassed or _dashboard_access_granted(),
+        "configured": bool(_access_password_hash()),
+        "bypassed": bypassed,
+        "sessionDays": _access_session_days(),
+    })
+
+
+@app.route("/api/access/login", methods=["POST"])
+def dashboard_access_login():
+    password_hash = _access_password_hash()
+    if not password_hash:
+        return jsonify({
+            "error": "服务器尚未配置网页访问凭证，请运行 ./start.sh configure-access",
+            "code": "dashboard_access_not_configured",
+        }), 503
+
+    client_key = request.remote_addr or "unknown"
+    limited, _ = _access_failure_state(client_key)
+    if limited:
+        return jsonify({
+            "error": "尝试次数过多，请 15 分钟后重试",
+            "code": "dashboard_access_rate_limited",
+        }), 429
+
+    payload = request.get_json(silent=True) or {}
+    password = str(payload.get("password") or "")
+    if not password or not check_password_hash(password_hash, password):
+        limited, _ = _access_failure_state(client_key, record=True)
+        status = 429 if limited else 401
+        return jsonify({
+            "error": "访问凭证不正确" if not limited else "尝试次数过多，请 15 分钟后重试",
+            "code": "dashboard_access_invalid" if not limited else "dashboard_access_rate_limited",
+        }), status
+
+    _clear_access_failures(client_key)
+    session.clear()
+    session.permanent = True
+    session[ACCESS_SESSION_KEY] = _access_version(password_hash)
+    return jsonify({
+        "authenticated": True,
+        "sessionDays": _access_session_days(),
+    })
+
+
+@app.route("/api/access/logout", methods=["POST"])
+def dashboard_access_logout():
+    session.clear()
+    return jsonify({"authenticated": False})
 
 
 def _public_app_url() -> str:
