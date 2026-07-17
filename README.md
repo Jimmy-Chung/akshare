@@ -56,10 +56,29 @@ LONGBRIDGE_ACCESS_TOKEN=...
 CODEX_REPORT_API_TOKEN=一个独立且足够长的随机字符串
 AI_ASSISTANT_PROVIDER=deepseek
 DEEPSEEK_API_KEY=...
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-pro
 ```
 
 后端会优先读取仓库根目录 `.env`，也兼容旧变量名 `LONGPORT_*`。
+
+首次开放外网访问前，先设置网页访问凭证：
+
+```bash
+./start.sh configure-access
+```
+
+命令会隐藏输入，将密码哈希写入本机 `.env`，不会保存或回显明文。外网访问必须先
+输入该凭证，验证成功后默认保持登录 30 天；重新运行命令修改凭证会立即使旧登录失效。
+本机 `127.0.0.1` 上的 watcher、报告采集器和健康检查不受影响。
+
+不想手工编辑 `.env` 时，可以使用隐藏输入的本机配置命令：
+
+```bash
+./start.sh configure-deepseek
+```
+
+该命令只在本机 `.env` 中写入 DeepSeek Provider、API 地址和 API Key，不会回显
+Key，并会在服务已运行时自动重启。模型名称继续由 AI 助手页面配置。
 
 如果没有固定 API 凭证，应用入口会显示 Longbridge OAuth 授权页。云端部署至少配置：
 

@@ -159,6 +159,26 @@ stop_all() {
 }
 
 case "${1:-start}" in
+  configure-access)
+    "$PYTHON_BIN" "$ROOT/tools/configure_dashboard_access.py"
+    if lsof -iTCP:5001 -sTCP:LISTEN > /dev/null 2>&1; then
+      stop_all
+      "$0" start
+    else
+      echo "运行 ./start.sh start 以启动服务。"
+    fi
+    ;;
+
+  configure-deepseek)
+    "$PYTHON_BIN" "$ROOT/tools/configure_deepseek.py"
+    if lsof -iTCP:5001 -sTCP:LISTEN > /dev/null 2>&1; then
+      stop_all
+      "$0" start
+    else
+      echo "运行 ./start.sh start 以启动服务。"
+    fi
+    ;;
+
   start)
     echo "=========================================="
     echo " 全球市场行情看板 - 服务启动"
@@ -189,7 +209,7 @@ case "${1:-start}" in
     echo ""
     echo "本地:  http://localhost:3005"
     echo "后端:  http://localhost:5001"
-    echo "采集:  CN/HK/US 热力图 watcher 与四时段报告采集器已随应用启动"
+    echo "采集:  CN/HK/US 热力图 watcher、四时段报告与周线采集器已随应用启动"
     echo "日志:  $LOG_DIR/"
     ;;
 
@@ -221,9 +241,9 @@ case "${1:-start}" in
     report_pids="$(report_collector_pids)"
     report_count="$(printf '%s\n' "$report_pids" | sed '/^$/d' | wc -l | tr -d ' ')"
     if screen -ls | grep -q "$REPORT_COLLECTOR_SESSION" && [ "$report_count" -eq 1 ]; then
-      echo "  ✅ 四时段报告采集器"
+      echo "  ✅ 四时段报告与周线采集器"
     else
-      echo "  ❌ 四时段报告采集器"
+      echo "  ❌ 四时段报告与周线采集器"
       failures=$((failures + 1))
     fi
     if [ -f "$LOG_DIR/frontend.log" ]; then
@@ -248,7 +268,7 @@ case "${1:-start}" in
     ;;
 
   *)
-    echo "用法: $0 {start|stop|status}"
+    echo "用法: $0 {start|stop|status|configure-access|configure-deepseek}"
     exit 1
     ;;
 esac

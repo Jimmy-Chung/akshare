@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import secrets
-import subprocess
+import threading
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 from urllib.parse import urlencode
 
-from flask import Flask, jsonify, redirect, request, send_file, session
-from flask_cors import CORS
+from flask import Flask, jsonify, redirect, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import check_password_hash
 
 from providers import legacy_market, longbridge, longbridge_oauth, news, sectors_ths
 from providers.common import merge_preferred_rows, merge_with_lazy_fallback
@@ -20,22 +23,21 @@ from services.dashboard import build_dashboard_overview
 from services.ai_assistant import (
     AssistantConfigurationError,
     AssistantProviderError,
-    generate_market_report,
+    generate_assistant_response,
     provider_catalog,
 )
-from services.heatmap_timeline import (
-    HeatmapTimelineError,
-    list_heatmap_timeline_frames,
-    render_heatmap_timeline_video,
-    resolve_frame_path,
-    resolve_frame_preview_path,
+from services.market_query import (
+    MarketQueryError,
+    MarketQueryNotFound,
+    execute_market_query,
 )
 from services.heatmap_snapshots import (
     HeatmapSnapshotError,
-    attach_heatmap_image,
     create_heatmap_snapshot,
     get_heatmap_snapshot,
     latest_heatmap_snapshot,
+    list_heatmap_snapshot_dates,
+    list_heatmap_snapshot_history,
 )
 from services.reports import (
     get_history_report,
@@ -46,6 +48,12 @@ from services.reports import (
     regenerate_report,
     report_automation_config,
     report_schedule,
+)
+from services.weekly_reports import (
+    WeeklyReportError,
+    capture_weekly_market_context,
+    get_cached_weekly_market_context,
+    weekly_period_for_date,
 )
 
 def _load_flask_secret() -> str:
@@ -68,19 +76,171 @@ def _load_flask_secret() -> str:
             return path.read_text(encoding="utf-8").strip()
 
 
+def _session_cookie_secure() -> bool:
+    configured = os.getenv("SESSION_COOKIE_SECURE", "").strip().lower()
+    if configured:
+        return configured in {"1", "true", "yes"}
+    return os.getenv("PUBLIC_APP_URL", "").strip().lower().startswith("https://")
+
+
+def _access_session_days() -> int:
+    try:
+        return min(max(int(os.getenv("DASHBOARD_ACCESS_SESSION_DAYS", "30")), 1), 365)
+    except ValueError:
+        return 30
+
+
 app = Flask(__name__)
 app.secret_key = _load_flask_secret()
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower()
-    in {"1", "true", "yes"},
+    SESSION_COOKIE_SECURE=_session_cookie_secure(),
+    PERMANENT_SESSION_LIFETIME=timedelta(days=_access_session_days()),
 )
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
-CORS(app)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+ACCESS_SESSION_KEY = "dashboard_access_version"
+ACCESS_EXEMPT_PATHS = {
+    "/api/access/status",
+    "/api/access/login",
+    "/api/access/logout",
+    "/api/system/status",
+}
+ACCESS_FAILURE_LIMIT = 5
+ACCESS_FAILURE_WINDOW_SECONDS = 15 * 60
+_ACCESS_FAILURES: Dict[str, List[float]] = {}
+_ACCESS_FAILURES_LOCK = threading.Lock()
+
+
+def _access_password_hash() -> str:
+    return os.getenv("DASHBOARD_ACCESS_PASSWORD_HASH", "").strip()
+
+
+def _access_version(password_hash: str) -> str:
+    return hashlib.sha256(password_hash.encode("utf-8")).hexdigest()
+
+
+def _loopback_request() -> bool:
+    # Vite proxies public /api requests from a loopback socket too, and the
+    # Workspace Router may rewrite Host. Cloudflare marks tunnel traffic; after
+    # excluding it, Vite's overwritten original host distinguishes local browser
+    # traffic from other reverse proxies. Direct collectors have neither header.
+    if request.headers.get("CF-Connecting-IP") or request.headers.get("CF-Ray"):
+        return False
+    request_host = request.host.rsplit(":", 1)[0].strip("[]")
+    if request.remote_addr != "127.0.0.1":
+        return False
+    original_host = request.headers.get("X-Dashboard-Original-Host", "")
+    if original_host:
+        original_hostname = original_host.rsplit(":", 1)[0].strip("[]")
+        return original_hostname in {"localhost", "127.0.0.1"}
+    return request_host == "127.0.0.1"
+
+
+def _dashboard_access_granted() -> bool:
+    password_hash = _access_password_hash()
+    stored_version = str(session.get(ACCESS_SESSION_KEY) or "")
+    return bool(
+        password_hash
+        and stored_version
+        and secrets.compare_digest(stored_version, _access_version(password_hash))
+    )
+
+
+def _access_failure_state(client_key: str, *, record: bool = False) -> tuple[bool, int]:
+    now = time.monotonic()
+    with _ACCESS_FAILURES_LOCK:
+        attempts = [
+            value
+            for value in _ACCESS_FAILURES.get(client_key, [])
+            if now - value < ACCESS_FAILURE_WINDOW_SECONDS
+        ]
+        if record:
+            attempts.append(now)
+        if attempts:
+            _ACCESS_FAILURES[client_key] = attempts
+        else:
+            _ACCESS_FAILURES.pop(client_key, None)
+        return len(attempts) >= ACCESS_FAILURE_LIMIT, len(attempts)
+
+
+def _clear_access_failures(client_key: str) -> None:
+    with _ACCESS_FAILURES_LOCK:
+        _ACCESS_FAILURES.pop(client_key, None)
+
+
+@app.before_request
+def require_dashboard_access():
+    if request.method == "OPTIONS" or not request.path.startswith("/api/"):
+        return None
+    if _loopback_request() or request.path in ACCESS_EXEMPT_PATHS:
+        return None
+    if request.path.startswith("/api/codex/"):
+        return None
+    if _dashboard_access_granted():
+        return None
+    return jsonify({
+        "error": "请先输入看板访问凭证",
+        "code": "dashboard_access_required",
+    }), 401
+
+
+@app.route("/api/access/status", methods=["GET"])
+def dashboard_access_status():
+    bypassed = _loopback_request()
+    return jsonify({
+        "authenticated": bypassed or _dashboard_access_granted(),
+        "configured": bool(_access_password_hash()),
+        "bypassed": bypassed,
+        "sessionDays": _access_session_days(),
+    })
+
+
+@app.route("/api/access/login", methods=["POST"])
+def dashboard_access_login():
+    password_hash = _access_password_hash()
+    if not password_hash:
+        return jsonify({
+            "error": "服务器尚未配置网页访问凭证，请运行 ./start.sh configure-access",
+            "code": "dashboard_access_not_configured",
+        }), 503
+
+    client_key = request.remote_addr or "unknown"
+    limited, _ = _access_failure_state(client_key)
+    if limited:
+        return jsonify({
+            "error": "尝试次数过多，请 15 分钟后重试",
+            "code": "dashboard_access_rate_limited",
+        }), 429
+
+    payload = request.get_json(silent=True) or {}
+    password = str(payload.get("password") or "")
+    if not password or not check_password_hash(password_hash, password):
+        limited, _ = _access_failure_state(client_key, record=True)
+        status = 429 if limited else 401
+        return jsonify({
+            "error": "访问凭证不正确" if not limited else "尝试次数过多，请 15 分钟后重试",
+            "code": "dashboard_access_invalid" if not limited else "dashboard_access_rate_limited",
+        }), status
+
+    _clear_access_failures(client_key)
+    session.clear()
+    session.permanent = True
+    session[ACCESS_SESSION_KEY] = _access_version(password_hash)
+    return jsonify({
+        "authenticated": True,
+        "sessionDays": _access_session_days(),
+    })
+
+
+@app.route("/api/access/logout", methods=["POST"])
+def dashboard_access_logout():
+    session.clear()
+    return jsonify({"authenticated": False})
 
 
 def _public_app_url() -> str:
@@ -159,12 +319,55 @@ def assistant_providers():
 def assistant_chat():
     payload = request.get_json(silent=True) or {}
     try:
-        return jsonify(generate_market_report(payload, _public_app_url()))
+        return jsonify(generate_assistant_response(payload, _public_app_url()))
+    except MarketQueryNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
+    except MarketQueryError as exc:
+        return jsonify({"error": str(exc)}), 422
     except AssistantConfigurationError as exc:
         return jsonify({"error": str(exc)}), 422
     except AssistantProviderError as exc:
         logger.warning("AI 市场助手调用失败: %s", exc)
         return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/market-query/execute", methods=["POST"])
+def market_query_execute():
+    payload = request.get_json(silent=True) or {}
+    raw_query = payload.get("query") if isinstance(payload.get("query"), dict) else payload
+    try:
+        return jsonify(execute_market_query(raw_query))
+    except MarketQueryNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
+    except MarketQueryError as exc:
+        return jsonify({"error": str(exc)}), 422
+
+
+@app.route("/api/weekly-reports/generate", methods=["POST"])
+def weekly_reports_generate():
+    from datetime import date
+
+    anchor_value = request.args.get("date") or date.today().isoformat()
+    try:
+        return jsonify(capture_weekly_market_context(date.fromisoformat(anchor_value)))
+    except ValueError:
+        return jsonify({"error": "date 必须使用 YYYY-MM-DD 格式"}), 422
+    except WeeklyReportError as exc:
+        return jsonify({"error": str(exc)}), 409
+
+
+@app.route("/api/weekly-reports/captured", methods=["GET"])
+def weekly_reports_captured():
+    from datetime import date
+
+    anchor_value = request.args.get("date") or date.today().isoformat()
+    try:
+        context = get_cached_weekly_market_context(
+            weekly_period_for_date(date.fromisoformat(anchor_value))
+        )
+    except ValueError:
+        return jsonify({"error": "date 必须使用 YYYY-MM-DD 格式"}), 422
+    return jsonify(context) if context else (jsonify({"error": "该周周线尚未采集"}), 404)
 
 
 @app.route("/api/reports/latest", methods=["GET"])
@@ -210,43 +413,6 @@ def reports_schedule():
     return jsonify({"timezone": "Asia/Shanghai", "schedule": report_schedule()})
 
 
-@app.route("/api/heatmap-timeline/frames", methods=["GET"])
-def heatmap_timeline_frames():
-    market = request.args.get("market", "CN")
-    target_date = request.args.get("date", "")
-    try:
-        return jsonify(list_heatmap_timeline_frames(market, target_date))
-    except HeatmapTimelineError as exc:
-        return jsonify({"error": str(exc)}), 422
-
-
-@app.route("/api/heatmap-timeline/frame", methods=["GET"])
-def heatmap_timeline_frame():
-    market = request.args.get("market", "")
-    target_date = request.args.get("date", "")
-    filename = request.args.get("filename", "")
-    try:
-        return send_file(resolve_frame_path(market, target_date, filename), mimetype="image/png")
-    except HeatmapTimelineError as exc:
-        return jsonify({"error": str(exc)}), 404
-
-
-@app.route("/api/heatmap-timeline/preview", methods=["GET"])
-def heatmap_timeline_preview():
-    market = request.args.get("market", "")
-    target_date = request.args.get("date", "")
-    filename = request.args.get("filename", "")
-    try:
-        return send_file(
-            resolve_frame_preview_path(market, target_date, filename),
-            mimetype="image/png",
-            conditional=True,
-            max_age=31536000,
-        )
-    except HeatmapTimelineError as exc:
-        return jsonify({"error": str(exc)}), 404
-
-
 @app.route("/api/market-calendar", methods=["GET"])
 def market_calendar():
     from datetime import date
@@ -285,7 +451,6 @@ def latest_heatmap_snapshot_api():
         snapshot = latest_heatmap_snapshot(
             request.args.get("market", "CN"),
             at_or_before=request.args.get("before", ""),
-            require_image=request.args.get("requireImage", "") in {"1", "true", "yes"},
             scheduled_only=request.args.get("scheduledOnly", "") in {"1", "true", "yes"},
         )
     except HeatmapSnapshotError as exc:
@@ -299,48 +464,23 @@ def heatmap_snapshot_api():
     return jsonify(snapshot) if snapshot else (jsonify({"error": "未找到热点图快照"}), 404)
 
 
-@app.route("/api/heatmap-snapshots/image", methods=["POST"])
-def attach_heatmap_snapshot_image_api():
-    payload = request.get_json(silent=True) or {}
+@app.route("/api/heatmap-snapshots/dates", methods=["GET"])
+def heatmap_snapshot_dates_api():
     try:
-        return jsonify(attach_heatmap_image(
-            str(payload.get("snapshotId") or ""),
-            str(payload.get("path") or ""),
-            width=int(payload.get("width") or 0),
-            height=int(payload.get("height") or 0),
-            size=int(payload.get("size") or 0),
-        ))
-    except (HeatmapSnapshotError, TypeError, ValueError) as exc:
+        return jsonify(list_heatmap_snapshot_dates(request.args.get("market", "CN")))
+    except HeatmapSnapshotError as exc:
         return jsonify({"error": str(exc)}), 422
 
 
-@app.route("/api/heatmap-snapshots/refresh", methods=["POST"])
-def refresh_heatmap_snapshot_api():
-    market = request.args.get("market", "CN").upper()
-    if market not in {"CN", "HK", "US"}:
-        return jsonify({"error": "unsupported market"}), 422
-    script = Path(__file__).resolve().parents[2] / "tools" / "market_heatmap_timeline.py"
-    python_bin = os.getenv("AKSHARE_WATCHER_PYTHON_BIN", "/opt/homebrew/bin/python3")
-    port = {"CN": "9431", "HK": "9432", "US": "9433"}[market]
-    session_name = "us-night" if market == "US" else "close"
-    command = [
-        python_bin, str(script), "--market", market, "--session", session_name,
-        "--port", port, "--force", "--trigger", "manual", "capture",
-    ]
+@app.route("/api/heatmap-snapshots/history", methods=["GET"])
+def heatmap_snapshot_history_api():
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(script.parents[1]),
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        result = json.loads(completed.stdout) if completed.stdout.strip() else {"ok": True}
-        return jsonify({"ok": True, "snapshot": result})
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        logger.exception("立即刷新热点图失败: %s", exc)
-        return jsonify({"error": "热点图生成失败"}), 503
+        return jsonify(list_heatmap_snapshot_history(
+            request.args.get("market", "CN"),
+            request.args.get("date", ""),
+        ))
+    except HeatmapSnapshotError as exc:
+        return jsonify({"error": str(exc)}), 422
 
 
 def _codex_report_authorized() -> tuple[bool, str]:
@@ -395,24 +535,6 @@ def codex_reports_generate():
         return jsonify({"error": message}), status
     report_session = request.args.get("session") or latest_session()
     return jsonify(regenerate_report(report_session))
-
-
-@app.route("/api/codex/reports/heatmap-timeline/render", methods=["POST"])
-def codex_render_heatmap_timeline():
-    authorized, message = _codex_report_authorized()
-    if not authorized:
-        status = 503 if not os.getenv("CODEX_REPORT_API_TOKEN", "").strip() else 401
-        return jsonify({"error": message}), status
-    payload = request.get_json(silent=True) or {}
-    try:
-        result = render_heatmap_timeline_video(
-            str(payload.get("market") or ""),
-            str(payload.get("date") or ""),
-            float(payload.get("fps") or 2),
-        )
-        return jsonify(result)
-    except (TypeError, ValueError, HeatmapTimelineError) as exc:
-        return jsonify({"error": str(exc)}), 422
 
 
 @app.route("/api/news", methods=["GET"])

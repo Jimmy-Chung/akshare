@@ -5,6 +5,8 @@ type IconProps = SVGProps<SVGSVGElement>
 export const GlobeIcon = ({ className = '', ...props }: IconProps) => (
   <svg
     className={className}
+    width="24"
+    height="24"
     viewBox="0 0 24 24"
     fill="none"
     aria-hidden="true"
@@ -23,6 +25,8 @@ export const GlobeIcon = ({ className = '', ...props }: IconProps) => (
 export const RefreshIcon = ({ className = '', ...props }: IconProps) => (
   <svg
     className={className}
+    width="24"
+    height="24"
     viewBox="0 0 24 24"
     fill="none"
     aria-hidden="true"
@@ -39,6 +43,8 @@ export const RefreshIcon = ({ className = '', ...props }: IconProps) => (
 export const ChevronRightIcon = ({ className = '', ...props }: IconProps) => (
   <svg
     className={className}
+    width="24"
+    height="24"
     viewBox="0 0 24 24"
     fill="none"
     aria-hidden="true"

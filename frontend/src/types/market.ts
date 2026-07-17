@@ -137,13 +137,37 @@ export interface AiProviderCatalog {
 
 export interface AiAssistantResponse {
   content: string
-  reportType: 'daily' | 'weekly'
-  session: SessionKey | 'weekly'
+  responseType?: 'query'
+  reportType: 'daily' | 'weekly' | 'query'
+  session: SessionKey | 'weekly' | 'query'
   label: string
   provider: string
   model: string
   generatedAt: string
   dataPeriods: string[]
+  targetDate?: string
+  period?: {
+    startDate: string
+    endDate: string
+    anchorDate: string
+    timezone: string
+    isCurrentWeek: boolean
+  }
+  coverage?: {
+    requestedIndexCount: number
+    availableIndexCount: number
+    unavailableIndexCount: number
+    sourceCounts: Record<string, number>
+    unavailableIndices: Array<{
+      name: string
+      code: string
+      scope: string
+      reason: string
+    }>
+    complete: boolean
+  }
+  query?: Record<string, unknown>
+  result?: Record<string, unknown>
 }
 
 export interface SessionReport {
@@ -209,18 +233,6 @@ export interface SectorRankingItem {
   }
 }
 
-export interface HeatmapTimelineFrame {
-  filename: string
-  label: string
-  capturedAt: string
-  scheduledAt?: string
-  trigger?: 'scheduled' | 'session-close' | 'manual'
-  snapshotId?: string
-  size: number
-  url: string
-  previewUrl?: string
-}
-
 export interface HeatmapSnapshotIndustry {
   name: string
   code: string
@@ -255,11 +267,30 @@ export interface HeatmapSnapshot {
   }
 }
 
-export interface HeatmapTimelineFramesResponse {
+export interface HeatmapSnapshotHistoryItem {
+  snapshotId: string
+  label: string
+  scheduledAt?: string
+  capturedAt?: string
+  trigger: 'scheduled' | 'session-close'
+}
+
+export interface HeatmapSnapshotHistoryResponse {
   market: 'CN' | 'HK' | 'US'
   date: string
-  frameCount: number
-  frames: HeatmapTimelineFrame[]
+  snapshotCount: number
+  snapshots: HeatmapSnapshotHistoryItem[]
+}
+
+export interface HeatmapSnapshotDatesResponse {
+  market: 'CN' | 'HK' | 'US'
+  timezone: string
+  timezoneLabel: string
+  latestDate: string
+  dates: Array<{
+    date: string
+    snapshotCount: number
+  }>
 }
 
 export interface SectorRankingPair {

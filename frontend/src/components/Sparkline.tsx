@@ -47,7 +47,15 @@ const Sparkline = ({
   }
 
   return (
-    <svg className={`sparkline ${className}`} viewBox={`0 0 120 ${height}`} preserveAspectRatio="none">
+    <svg
+      className={`sparkline ${className}`}
+      width="120"
+      height={height}
+      viewBox={`0 0 120 ${height}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+      focusable="false"
+    >
       <defs>
         <linearGradient id={`spark-area-${reactId}`} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity="0.34" />

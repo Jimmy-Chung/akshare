@@ -10,7 +10,12 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:5001',
-        changeOrigin: true
+        changeOrigin: true,
+        configure(proxy) {
+          proxy.on('proxyReq', (proxyRequest, request) => {
+            proxyRequest.setHeader('X-Dashboard-Original-Host', request.headers.host || '')
+          })
+        }
       }
     }
   }

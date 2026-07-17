@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, time
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -429,6 +429,43 @@ def get_cached_report(session: str, target_date: str = "") -> Dict[str, Any]:
     day_key = target_date or datetime.now(REPORT_TIMEZONE).date().isoformat()
     report = (_read_cache().get(day_key) or {}).get(session_name)
     return _public_report(report) if _is_indices_compatible(report) else {}
+
+
+def get_cached_reports_between(
+    start_date: str,
+    end_date: str,
+) -> List[Dict[str, Any]]:
+    """Return every compatible report package in an inclusive date range."""
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError:
+        return []
+    if start > end:
+        return []
+
+    cache = _read_cache()
+    result: List[Dict[str, Any]] = []
+    for day_key in sorted(cache):
+        try:
+            day = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        if day < start or day > end:
+            continue
+        reports_by_session = cache.get(day_key)
+        if not isinstance(reports_by_session, dict):
+            continue
+        sessions = {
+            session_name: _public_report(report)
+            for session_name in SESSION_TIMES
+            if _is_indices_compatible(
+                report := reports_by_session.get(session_name)
+            )
+        }
+        if sessions:
+            result.append({"date": day_key, "sessions": sessions})
+    return result
 
 
 def get_recent_reports(days: int = 7) -> List[Dict[str, Any]]:
