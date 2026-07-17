@@ -1,23 +1,16 @@
 import { useEffect, useState } from 'react'
 import GlobalOverviewBar from '../components/GlobalOverviewBar'
 import IndicesSection from '../components/IndicesSection'
-import LongbridgeSectorHeatmap from '../components/LongbridgeSectorHeatmap'
 import SessionSwitcher from '../components/SessionSwitcher'
 import { EmptyState, InlineError, SkeletonBlocks } from '../components/StateBlocks'
 import type {
   MarketIndexGroup,
-  SectorRankingItem,
-  SectorRankingPair,
   SessionKey,
   SessionReport,
 } from '../types/market'
 import { formatError, requestJson } from '../utils/api'
 import {
-  formatChineseAmount,
-  formatPercent,
-  formatPrice,
   formatReportDate,
-  getTrendClass,
   sessionLabel,
 } from '../utils/market'
 
@@ -27,94 +20,6 @@ const SCHEDULE = [
   { session: 'close' as const, time: '16:30', markets: 'A 股 · 港股' },
   { session: 'us-night' as const, time: '22:30', markets: '美股' },
 ]
-
-function RankingList({
-  title,
-  items,
-  showIndustryRelationship = false,
-}: {
-  title: string
-  items: SectorRankingItem[]
-  showIndustryRelationship?: boolean
-}) {
-  return (
-    <div className="report-ranking-list">
-      <h4>{title}</h4>
-      {items.map((item, index) => (
-        <div
-          className={showIndustryRelationship ? 'report-ranking-row report-ranking-row--linked' : 'report-ranking-row'}
-          key={item.code || `${item.name}-${index}`}
-        >
-          <div className="report-ranking-main">
-            <span className="report-ranking-index">{index + 1}</span>
-            <span className="report-ranking-name">
-              {showIndustryRelationship && item.parentName ? (
-                <small className="report-ranking-parent">
-                  <span>一级分类</span>
-                  <strong>{item.parentName}</strong>
-                </small>
-              ) : null}
-              <strong>{item.name}</strong>
-              {!showIndustryRelationship ? <small>{item.parentName || item.code}</small> : null}
-            </span>
-            <span className="report-ranking-value">
-              <strong className={getTrendClass(item.changePercent)}>
-                {formatPercent(item.changePercent)}
-              </strong>
-              <small>{item.marketValue ? formatChineseAmount(item.marketValue) : '--'}</small>
-            </span>
-          </div>
-          {showIndustryRelationship ? (
-            <div className="report-ranking-leader">
-              <span className="report-ranking-link-mark" aria-hidden="true">↳</span>
-              <span>
-                <small>行业领涨股</small>
-                <strong>{item.dayLeader?.name || '暂无数据'}</strong>
-              </span>
-              <span className="report-ranking-leader-code">
-                <small>{item.dayLeader?.code || '--'}</small>
-                <strong>
-                  {item.dayLeader?.price == null ? '--' : formatPrice(item.dayLeader.price)}
-                </strong>
-              </span>
-              <strong className={getTrendClass(item.dayLeader?.changePercent ?? 0)}>
-                {item.dayLeader?.name ? formatPercent(item.dayLeader.changePercent) : '--'}
-              </strong>
-            </div>
-          ) : null}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function RankingLevel({
-  title,
-  ranking,
-  showIndustryRelationship = false,
-}: {
-  title: string
-  ranking: SectorRankingPair
-  showIndustryRelationship?: boolean
-}) {
-  return (
-    <section className="report-ranking-level">
-      <h3>{title}</h3>
-      <div className="report-ranking-columns">
-        <RankingList
-          title="领涨前三"
-          items={ranking.leaders}
-          showIndustryRelationship={showIndustryRelationship}
-        />
-        <RankingList
-          title="领跌前三"
-          items={ranking.laggards}
-          showIndustryRelationship={showIndustryRelationship}
-        />
-      </div>
-    </section>
-  )
-}
 
 export default function ReportPage() {
   const searchParams = new URLSearchParams(window.location.search)
@@ -192,7 +97,7 @@ export default function ReportPage() {
         <div>
           <span className="page-hero__kicker">Reports</span>
           <h2>四时段市场日报</h2>
-          <p>每天于 09:30、12:30、16:30、22:30 生成结构化市场快照。</p>
+          <p>每天于 09:30、12:30、16:30、22:30 固化指数数据包，不包含热点图。</p>
         </div>
         <div className="report-hero__actions">
           <SessionSwitcher
@@ -292,48 +197,12 @@ export default function ReportPage() {
             reportMode
           />
 
-          <section className="surface-card">
-            <div className="section-heading">
-              <div>
-                <span className="section-kicker">Sector Rankings</span>
-                <h2>主要市场板块涨跌幅前三</h2>
-                <p>分别展示一级分类与二级行业的领涨、领跌前三。</p>
-              </div>
-            </div>
-            <div className="report-sector-markets">
-              {report.sectorRankings.map((market) => (
-                <section className="report-sector-market" key={market.market}>
-                  <div className="panel-header">
-                    <div>
-                      <h3>{market.title}</h3>
-                      <p>数据源：{market.source}</p>
-                    </div>
-                  </div>
-                  <RankingLevel title="一级分类" ranking={market.primary} />
-                  <RankingLevel
-                    title="二级行业 · 分类与领涨股关联"
-                    ranking={market.secondary}
-                    showIndustryRelationship
-                  />
-                  <LongbridgeSectorHeatmap
-                    market={market.market}
-                    showMarketTabs={false}
-                    exportFilenamePrefix={session}
-                    reportMode
-                    generatedAt={report.generatedAt}
-                    snapshotId={report.snapshotId}
-                  />
-                </section>
-              ))}
-            </div>
-          </section>
-
           <section className="surface-card surface-card--compact">
             <div className="report-source-note">
               <strong>数据来源</strong>
               <span>全球指数：{report.sources.globalIndices}</span>
               <span>主要指数：{report.sources.majorIndices}</span>
-              <span>板块排行：{report.sources.sectorRankings}</span>
+              <span>热点图：不属于报告数据包</span>
             </div>
           </section>
         </>

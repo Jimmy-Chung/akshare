@@ -102,8 +102,8 @@ export const buildChartPoints = (entry: Pick<IndexSnapshot, 'intradayData' | 'pr
 }
 
 export const sessionLabel = (session: SessionKey) => {
-  if (session === 'morning') return '早盘 09:30'
-  if (session === 'midday') return '午盘 12:30'
-  if (session === 'close') return '收盘 16:30'
-  return '美股夜盘 22:30'
+  if (session === 'morning') return '早报 09:30'
+  if (session === 'midday') return '午报 12:30'
+  if (session === 'close') return '收盘报 16:30'
+  return '夜报 22:30'
 }

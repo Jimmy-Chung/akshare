@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 from urllib.parse import urlencode
@@ -12,20 +14,33 @@ from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from providers import legacy_market, longbridge, longbridge_oauth, news, sectors_ths
-from providers.common import merge_preferred_rows
+from providers.common import merge_preferred_rows, merge_with_lazy_fallback
 from providers.market_catalog import GLOBAL_INDEX_ORDER
 from services.dashboard import build_dashboard_overview
+from services.ai_assistant import (
+    AssistantConfigurationError,
+    AssistantProviderError,
+    generate_market_report,
+    provider_catalog,
+)
 from services.heatmap_timeline import (
     HeatmapTimelineError,
     list_heatmap_timeline_frames,
     render_heatmap_timeline_video,
     resolve_frame_path,
+    resolve_frame_preview_path,
+)
+from services.heatmap_snapshots import (
+    HeatmapSnapshotError,
+    attach_heatmap_image,
+    create_heatmap_snapshot,
+    get_heatmap_snapshot,
+    latest_heatmap_snapshot,
 )
 from services.reports import (
-    ReportGenerationError,
     get_history_report,
+    get_cached_report,
     get_report_by_snapshot,
-    get_report_heatmap_snapshot,
     get_latest_report,
     latest_session,
     regenerate_report,
@@ -112,31 +127,44 @@ def real_or_empty(fetcher: Callable[[], List[Dict[str, Any]]], label: str):
 
 def _major_indices(group: str) -> List[Dict[str, Any]]:
     if group == "a":
-        return merge_preferred_rows(
+        return merge_with_lazy_fallback(
             longbridge.fetch_a_indices(),
-            legacy_market.fetch_a_indices(),
+            legacy_market.fetch_a_indices,
             [item["code"] for item in longbridge.A_INDEX_SYMBOLS],
         )
     if group == "hk":
-        return merge_preferred_rows(
+        return merge_with_lazy_fallback(
             longbridge.fetch_hk_indices(),
-            legacy_market.fetch_hk_indices(),
+            legacy_market.fetch_hk_indices,
             [item["code"] for item in longbridge.HK_INDEX_SYMBOLS],
         )
-    return merge_preferred_rows(
+    return merge_with_lazy_fallback(
         longbridge.fetch_us_indices(),
-        legacy_market.fetch_us_indices(),
+        legacy_market.fetch_us_indices,
         [item["code"] for item in longbridge.US_INDEX_SYMBOLS],
     )
 
 
 @app.route("/api/dashboard/overview", methods=["GET"])
 def dashboard_overview():
-    scope = request.args.get("scope", "all")
-    limit = int(request.args.get("limit", 12) or 12)
-    digest = news.fetch_market_news(scope=scope, limit=limit)
-    overview = build_dashboard_overview(news_digest=digest)
-    return jsonify(overview)
+    return jsonify(build_dashboard_overview())
+
+
+@app.route("/api/assistant/providers", methods=["GET"])
+def assistant_providers():
+    return jsonify(provider_catalog())
+
+
+@app.route("/api/assistant/chat", methods=["POST"])
+def assistant_chat():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(generate_market_report(payload, _public_app_url()))
+    except AssistantConfigurationError as exc:
+        return jsonify({"error": str(exc)}), 422
+    except AssistantProviderError as exc:
+        logger.warning("AI 市场助手调用失败: %s", exc)
+        return jsonify({"error": str(exc)}), 502
 
 
 @app.route("/api/reports/latest", methods=["GET"])
@@ -152,6 +180,16 @@ def reports_history():
     return jsonify(get_history_report(session, target_date))
 
 
+@app.route("/api/reports/captured", methods=["GET"])
+def reports_captured():
+    session_name = request.args.get("session") or latest_session()
+    target_date = request.args.get("date") or ""
+    report = get_cached_report(session_name, target_date)
+    if not report:
+        return jsonify({"error": "该时段数据包尚未采集"}), 404
+    return jsonify(report)
+
+
 @app.route("/api/reports/snapshot", methods=["GET"])
 def reports_snapshot():
     snapshot_id = request.args.get("snapshotId", "").strip()
@@ -161,23 +199,10 @@ def reports_snapshot():
     return jsonify(report)
 
 
-@app.route("/api/reports/heatmap-snapshot", methods=["GET"])
-def reports_heatmap_snapshot():
-    snapshot_id = request.args.get("snapshotId", "").strip()
-    market = request.args.get("market", "").strip()
-    snapshot = get_report_heatmap_snapshot(snapshot_id, market)
-    if not snapshot:
-        return jsonify({"error": "未找到对应的热力图快照"}), 404
-    return jsonify(snapshot)
-
-
 @app.route("/api/reports/generate", methods=["POST"])
 def reports_generate():
     session = request.args.get("session") or latest_session()
-    try:
-        return jsonify(regenerate_report(session))
-    except ReportGenerationError as exc:
-        return jsonify({"error": str(exc)}), 503
+    return jsonify(regenerate_report(session))
 
 
 @app.route("/api/reports/schedule", methods=["GET"])
@@ -204,6 +229,118 @@ def heatmap_timeline_frame():
         return send_file(resolve_frame_path(market, target_date, filename), mimetype="image/png")
     except HeatmapTimelineError as exc:
         return jsonify({"error": str(exc)}), 404
+
+
+@app.route("/api/heatmap-timeline/preview", methods=["GET"])
+def heatmap_timeline_preview():
+    market = request.args.get("market", "")
+    target_date = request.args.get("date", "")
+    filename = request.args.get("filename", "")
+    try:
+        return send_file(
+            resolve_frame_preview_path(market, target_date, filename),
+            mimetype="image/png",
+            conditional=True,
+            max_age=31536000,
+        )
+    except HeatmapTimelineError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@app.route("/api/market-calendar", methods=["GET"])
+def market_calendar():
+    from datetime import date
+
+    market = request.args.get("market", "CN")
+    start_value = request.args.get("start") or date.today().isoformat()
+    end_value = request.args.get("end") or start_value
+    try:
+        return jsonify(
+            longbridge.fetch_market_calendar(
+                market,
+                date.fromisoformat(start_value),
+                date.fromisoformat(end_value),
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
+
+
+@app.route("/api/heatmap-snapshots/generate", methods=["POST"])
+def generate_heatmap_snapshot_api():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(create_heatmap_snapshot(
+            str(payload.get("market") or request.args.get("market") or "CN"),
+            trigger=str(payload.get("trigger") or "scheduled"),
+            scheduled_at=str(payload.get("scheduledAt") or ""),
+        ))
+    except HeatmapSnapshotError as exc:
+        return jsonify({"error": str(exc)}), 503
+
+
+@app.route("/api/heatmap-snapshots/latest", methods=["GET"])
+def latest_heatmap_snapshot_api():
+    try:
+        snapshot = latest_heatmap_snapshot(
+            request.args.get("market", "CN"),
+            at_or_before=request.args.get("before", ""),
+            require_image=request.args.get("requireImage", "") in {"1", "true", "yes"},
+            scheduled_only=request.args.get("scheduledOnly", "") in {"1", "true", "yes"},
+        )
+    except HeatmapSnapshotError as exc:
+        return jsonify({"error": str(exc)}), 422
+    return jsonify(snapshot) if snapshot else (jsonify({"error": "暂无热点图快照"}), 404)
+
+
+@app.route("/api/heatmap-snapshots/snapshot", methods=["GET"])
+def heatmap_snapshot_api():
+    snapshot = get_heatmap_snapshot(request.args.get("snapshotId", ""))
+    return jsonify(snapshot) if snapshot else (jsonify({"error": "未找到热点图快照"}), 404)
+
+
+@app.route("/api/heatmap-snapshots/image", methods=["POST"])
+def attach_heatmap_snapshot_image_api():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(attach_heatmap_image(
+            str(payload.get("snapshotId") or ""),
+            str(payload.get("path") or ""),
+            width=int(payload.get("width") or 0),
+            height=int(payload.get("height") or 0),
+            size=int(payload.get("size") or 0),
+        ))
+    except (HeatmapSnapshotError, TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 422
+
+
+@app.route("/api/heatmap-snapshots/refresh", methods=["POST"])
+def refresh_heatmap_snapshot_api():
+    market = request.args.get("market", "CN").upper()
+    if market not in {"CN", "HK", "US"}:
+        return jsonify({"error": "unsupported market"}), 422
+    script = Path(__file__).resolve().parents[2] / "tools" / "market_heatmap_timeline.py"
+    python_bin = os.getenv("AKSHARE_WATCHER_PYTHON_BIN", "/opt/homebrew/bin/python3")
+    port = {"CN": "9431", "HK": "9432", "US": "9433"}[market]
+    session_name = "us-night" if market == "US" else "close"
+    command = [
+        python_bin, str(script), "--market", market, "--session", session_name,
+        "--port", port, "--force", "--trigger", "manual", "capture",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(script.parents[1]),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        result = json.loads(completed.stdout) if completed.stdout.strip() else {"ok": True}
+        return jsonify({"ok": True, "snapshot": result})
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.exception("立即刷新热点图失败: %s", exc)
+        return jsonify({"error": "热点图生成失败"}), 503
 
 
 def _codex_report_authorized() -> tuple[bool, str]:
@@ -257,10 +394,7 @@ def codex_reports_generate():
         status = 503 if not os.getenv("CODEX_REPORT_API_TOKEN", "").strip() else 401
         return jsonify({"error": message}), status
     report_session = request.args.get("session") or latest_session()
-    try:
-        return jsonify(regenerate_report(report_session))
-    except ReportGenerationError as exc:
-        return jsonify({"error": str(exc)}), 503
+    return jsonify(regenerate_report(report_session))
 
 
 @app.route("/api/codex/reports/heatmap-timeline/render", methods=["POST"])
@@ -370,9 +504,9 @@ def longbridge_auth_callback():
 @app.route("/api/global-indices", methods=["GET"])
 def get_global_indices():
     return jsonify(
-        merge_preferred_rows(
+        merge_with_lazy_fallback(
             longbridge.fetch_global_indices(),
-            legacy_market.fetch_global_indices(),
+            legacy_market.fetch_global_indices,
             GLOBAL_INDEX_ORDER,
         )
     )
@@ -443,9 +577,9 @@ def get_a_board_stocks():
 @app.route("/api/hk-stocks", methods=["GET"])
 def get_hk_stocks():
     return jsonify(
-        merge_preferred_rows(
+        merge_with_lazy_fallback(
             longbridge.fetch_hk_weight_stocks(),
-            legacy_market.fetch_hk_weight_stocks(),
+            legacy_market.fetch_hk_weight_stocks,
             [item["code"] for item in longbridge.HK_WEIGHT_SYMBOLS],
         )
     )
@@ -454,9 +588,9 @@ def get_hk_stocks():
 @app.route("/api/us-stocks", methods=["GET"])
 def get_us_stocks():
     return jsonify(
-        merge_preferred_rows(
+        merge_with_lazy_fallback(
             longbridge.fetch_us_weight_stocks(),
-            legacy_market.fetch_us_weight_stocks(),
+            legacy_market.fetch_us_weight_stocks,
             [item["code"] for item in longbridge.US_WEIGHT_SYMBOLS],
         )
     )

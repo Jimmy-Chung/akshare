@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from providers import legacy_market, longbridge, sectors_ths
-from providers.common import merge_preferred_rows
+from providers.common import merge_with_lazy_fallback
 from providers.market_catalog import GLOBAL_INDEX_ORDER, GLOBAL_MARKET_REGIONS
 
 OVERVIEW_CACHE_TTL = 120
@@ -56,8 +56,7 @@ def _enrich_boards(boards: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def build_dashboard_overview(*, news_digest: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    digest = news_digest or []
-    cache_key = "|".join(article.get("id", "") for article in digest[:6]) or "empty"
+    cache_key = "market-only"
     cached = OVERVIEW_CACHE.get(cache_key)
     if cached and time.time() - cached[0] < OVERVIEW_CACHE_TTL:
         return cached[1]
@@ -66,46 +65,26 @@ def build_dashboard_overview(*, news_digest: Optional[List[Dict[str, Any]]] = No
     longbridge_a = longbridge.fetch_a_indices()
     longbridge_hk = longbridge.fetch_hk_indices()
     longbridge_us = longbridge.fetch_us_indices()
-    longbridge_a_weights = longbridge.fetch_a_weight_stocks()
-    longbridge_hk_weights = longbridge.fetch_hk_weight_stocks()
-    longbridge_us_weights = longbridge.fetch_us_weight_stocks()
-
-    global_indices = merge_preferred_rows(
+    global_indices = merge_with_lazy_fallback(
         longbridge_global,
-        legacy_market.fetch_global_indices(),
+        legacy_market.fetch_global_indices,
         GLOBAL_INDEX_ORDER,
     )
-    a_indices = merge_preferred_rows(
+    a_indices = merge_with_lazy_fallback(
         longbridge_a,
-        legacy_market.fetch_a_indices(),
+        legacy_market.fetch_a_indices,
         [item["code"] for item in longbridge.A_INDEX_SYMBOLS],
     )
-    hk_indices = merge_preferred_rows(
+    hk_indices = merge_with_lazy_fallback(
         longbridge_hk,
-        legacy_market.fetch_hk_indices(),
+        legacy_market.fetch_hk_indices,
         [item["code"] for item in longbridge.HK_INDEX_SYMBOLS],
     )
-    us_indices = merge_preferred_rows(
+    us_indices = merge_with_lazy_fallback(
         longbridge_us,
-        legacy_market.fetch_us_indices(),
+        legacy_market.fetch_us_indices,
         [item["code"] for item in longbridge.US_INDEX_SYMBOLS],
     )
-    a_weights = merge_preferred_rows(
-        longbridge_a_weights,
-        [],
-        [item["code"] for item in longbridge.A_WEIGHT_SYMBOLS],
-    )
-    hk_weights = merge_preferred_rows(
-        longbridge_hk_weights,
-        legacy_market.fetch_hk_weight_stocks(),
-        [item["code"] for item in longbridge.HK_WEIGHT_SYMBOLS],
-    )
-    us_weights = merge_preferred_rows(
-        longbridge_us_weights,
-        legacy_market.fetch_us_weight_stocks(),
-        [item["code"] for item in longbridge.US_WEIGHT_SYMBOLS],
-    )
-
     boards = sectors_ths.fetch_a_boards()
     breadth = sectors_ths.fetch_market_breadth()
     leaders, laggards = _slice_top_bottom(boards)
@@ -126,20 +105,15 @@ def build_dashboard_overview(*, news_digest: Optional[List[Dict[str, Any]]] = No
             "leaders": leaders,
             "laggards": laggards,
         },
-        "aWeights": a_weights,
-        "hkWeights": hk_weights,
-        "usWeights": us_weights,
-        "newsDigest": digest,
+        "newsDigest": [],
         "updatedAt": datetime.now().isoformat(),
         "sources": {
             "market": "longbridge-first",
             "sectors": "ths",
-            "news": "longbridge-first",
         },
         "sourceSummary": {
             "global": _source_summary(global_indices),
             "majorIndices": _source_summary([*a_indices, *hk_indices, *us_indices]),
-            "weights": _source_summary([*a_weights, *hk_weights, *us_weights]),
         },
         "sourceStatus": {
             "longbridge": longbridge.diagnostics(),

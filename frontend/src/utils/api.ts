@@ -1,7 +1,8 @@
 export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init)
   if (!response.ok) {
-    throw new Error(`请求失败 ${response.status}`)
+    const payload = await response.json().catch(() => null) as { error?: string } | null
+    throw new Error(payload?.error || `请求失败 ${response.status}`)
   }
   return response.json() as Promise<T>
 }

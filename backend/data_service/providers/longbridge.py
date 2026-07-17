@@ -5,8 +5,9 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from threading import BoundedSemaphore, Lock
 from typing import Any, Dict, List, Optional
 
 from .common import compute_change_percent, safe_float, to_iso_time
@@ -20,6 +21,7 @@ try:
         Config,
         ContentContext,
         HttpClient,
+        Market,
         MarketContext,
         OAuthBuilder,
         Period,
@@ -33,6 +35,7 @@ except Exception:  # pragma: no cover - handled by runtime fallback
     MarketContext = None  # type: ignore[assignment]
     ContentContext = None  # type: ignore[assignment]
     HttpClient = None  # type: ignore[assignment]
+    Market = None  # type: ignore[assignment]
     OAuthBuilder = None  # type: ignore[assignment]
     AdjustType = None  # type: ignore[assignment]
     Period = None  # type: ignore[assignment]
@@ -471,6 +474,21 @@ INDUSTRY_HEATMAP_CACHE_TTL = 60
 INDUSTRY_HEATMAP_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 INDUSTRY_STOCK_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 INDUSTRY_GROUP_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+INDUSTRY_MEMBERS_CACHE_TTL = 6 * 60 * 60
+INDUSTRY_MEMBERS_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+INDUSTRY_SHARELIST_WORKERS = 4
+INDUSTRY_GROUP_WORKERS = 2
+INDUSTRY_ACTIVITY_WORKERS = 6
+INDUSTRY_ACTIVITY_LIMIT = 24
+INDUSTRY_SHARELIST_MAX_IN_FLIGHT = 5
+INDUSTRY_SHARELIST_SEMAPHORE = BoundedSemaphore(INDUSTRY_SHARELIST_MAX_IN_FLIGHT)
+INDUSTRY_CACHE_LOCKS_GUARD = Lock()
+INDUSTRY_CACHE_LOCKS: Dict[str, Lock] = {}
+
+
+def _industry_cache_lock(cache_key: str) -> Lock:
+    with INDUSTRY_CACHE_LOCKS_GUARD:
+        return INDUSTRY_CACHE_LOCKS.setdefault(cache_key, Lock())
 
 
 def _industry_rank(market: str, indicator: int) -> Dict[str, Any]:
@@ -520,11 +538,14 @@ def _sharelist_stocks(sharelist_id: str) -> List[Dict[str, Any]]:
     if not client:
         return []
     try:
-        response = client.request(
-            "get",
-            f"/v1/sharelists/{sharelist_id}"
-            "?constituent=true&quote=true&subscription=true",
-        )
+        # Bound aggregate traffic across concurrent industry requests. A request-level
+        # executor alone would allow N pages to multiply the Longbridge concurrency.
+        with INDUSTRY_SHARELIST_SEMAPHORE:
+            response = client.request(
+                "get",
+                f"/v1/sharelists/{sharelist_id}"
+                "?constituent=true&quote=true&subscription=true",
+            )
         return (response.get("sharelist") or {}).get("stocks") or []
     except Exception as exc:
         logger.warning("Longbridge 行业股单 %s 获取失败: %s", sharelist_id, exc)
@@ -540,17 +561,100 @@ def _stock_symbol(stock: Dict[str, Any]) -> str:
 def _industry_members(market: str, counter_id: str) -> Dict[str, Any]:
     peers = _industry_peers(market, counter_id)
     chain = peers.get("chain") or {}
+    sharelist_ids = _collect_sharelist_ids(chain)
     unique_stocks: Dict[str, Dict[str, Any]] = {}
-    for sharelist_id in _collect_sharelist_ids(chain):
-        for stock in _sharelist_stocks(sharelist_id):
-            symbol = _stock_symbol(stock)
-            if symbol:
-                unique_stocks[symbol] = stock
+    if sharelist_ids:
+        # executor.map keeps input order even when requests complete out of order.
+        # The pool queues IDs beyond max_workers, so callers do not need to batch them.
+        with ThreadPoolExecutor(
+            max_workers=min(INDUSTRY_SHARELIST_WORKERS, len(sharelist_ids))
+        ) as executor:
+            stocks_by_sharelist = executor.map(_sharelist_stocks, sharelist_ids)
+            for stocks in stocks_by_sharelist:
+                for stock in stocks:
+                    symbol = _stock_symbol(stock)
+                    if symbol:
+                        unique_stocks[symbol] = stock
     return {
         "chain": chain,
         "stocks": list(unique_stocks.values()),
         "constituentCount": len(unique_stocks),
     }
+
+
+def _cached_industry_members(market: str, counter_id: str) -> Dict[str, Any]:
+    cache_key = f"{market}:{counter_id}"
+    cached = INDUSTRY_MEMBERS_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < INDUSTRY_MEMBERS_CACHE_TTL:
+        return cached[1]
+    with _industry_cache_lock(f"members:{cache_key}"):
+        cached = INDUSTRY_MEMBERS_CACHE.get(cache_key)
+        if cached and time.time() - cached[0] < INDUSTRY_MEMBERS_CACHE_TTL:
+            return cached[1]
+        payload = _industry_members(market, counter_id)
+        INDUSTRY_MEMBERS_CACHE[cache_key] = (time.time(), payload)
+        return payload
+
+
+def _fetch_industry_turnovers(
+    market: str,
+    industries: List[Dict[str, Any]],
+) -> Dict[str, Optional[float]]:
+    ctx = get_quote_context()
+    if not ctx or not industries:
+        return {}
+
+    members_by_code: Dict[str, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(
+        max_workers=min(INDUSTRY_ACTIVITY_WORKERS, len(industries))
+    ) as executor:
+        futures = {
+            str(industry.get("code") or ""): executor.submit(
+                _cached_industry_members,
+                market,
+                str(industry.get("code") or ""),
+            )
+            for industry in industries
+            if industry.get("code")
+        }
+        for code, future in futures.items():
+            try:
+                members_by_code[code] = future.result()
+            except Exception as exc:
+                logger.warning("Longbridge 行业 %s 成交额成分获取失败: %s", code, exc)
+
+    stock_by_symbol: Dict[str, Dict[str, Any]] = {}
+    symbols_by_industry: Dict[str, List[str]] = {}
+    for code, members in members_by_code.items():
+        symbols: List[str] = []
+        for stock in members.get("stocks") or []:
+            symbol = _stock_symbol(stock)
+            if not symbol:
+                continue
+            stock_by_symbol[symbol] = stock
+            symbols.append(symbol)
+        symbols_by_industry[code] = list(dict.fromkeys(symbols))
+
+    turnover_by_symbol: Dict[str, float] = {}
+    symbols = list(stock_by_symbol)
+    try:
+        for offset in range(0, len(symbols), 50):
+            for quote in ctx.quote(symbols[offset:offset + 50]):
+                turnover = safe_float(getattr(quote, "turnover", None), None)
+                if turnover is not None:
+                    turnover_by_symbol[str(getattr(quote, "symbol", ""))] = turnover
+    except Exception as exc:
+        logger.warning("Longbridge %s 行业成交额行情获取失败: %s", market, exc)
+
+    result: Dict[str, Optional[float]] = {}
+    for code, industry_symbols in symbols_by_industry.items():
+        values = [
+            turnover_by_symbol[symbol]
+            for symbol in industry_symbols
+            if symbol in turnover_by_symbol
+        ]
+        result[code] = sum(values) if values else None
+    return result
 
 
 def _fetch_industry_stocks(stocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -599,6 +703,7 @@ def _fetch_industry_stocks(stocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "changePercent": compute_change_percent(price, change_amount),
             "changeAmount": change_amount,
             "marketValue": shares * price if shares else None,
+            "turnover": safe_float(getattr(quote, "turnover", None), None),
             "tradeDate": to_iso_time(getattr(quote, "timestamp", "")),
             "source": "Longbridge",
             "isFallback": False,
@@ -618,17 +723,24 @@ def _industry_constituents(
     if cached and time.time() - cached[0] < INDUSTRY_HEATMAP_CACHE_TTL:
         return cached[1]
 
-    members = _industry_members(market, counter_id)
-    chain = members["chain"]
+    # Single-flight per industry: concurrent page requests wait for the first load
+    # and then reuse its cache instead of duplicating all upstream calls.
+    with _industry_cache_lock(cache_key):
+        cached = INDUSTRY_STOCK_CACHE.get(cache_key)
+        if cached and time.time() - cached[0] < INDUSTRY_HEATMAP_CACHE_TTL:
+            return cached[1]
 
-    payload = {
-        **industry_meta,
-        "name": str(chain.get("name") or industry_meta.get("name") or ""),
-        "stocks": _fetch_industry_stocks(members["stocks"]),
-        "constituentCount": members["constituentCount"],
-    }
-    INDUSTRY_STOCK_CACHE[cache_key] = (time.time(), payload)
-    return payload
+        members = _industry_members(market, counter_id)
+        chain = members["chain"]
+
+        payload = {
+            **industry_meta,
+            "name": str(chain.get("name") or industry_meta.get("name") or ""),
+            "stocks": _fetch_industry_stocks(members["stocks"]),
+            "constituentCount": members["constituentCount"],
+        }
+        INDUSTRY_STOCK_CACHE[cache_key] = (time.time(), payload)
+        return payload
 
 
 def _industry_group_constituents(
@@ -644,7 +756,9 @@ def _industry_group_constituents(
     all_industries = group.get("industries") or []
     industries = all_industries[:6]
     members_by_code: Dict[str, Dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(industries)))) as executor:
+    with ThreadPoolExecutor(
+        max_workers=min(INDUSTRY_GROUP_WORKERS, max(1, len(industries)))
+    ) as executor:
         futures = {
             str(industry.get("code") or ""): executor.submit(
                 _industry_members,
@@ -703,17 +817,21 @@ def fetch_industry_heatmap(
     industry_code: str = "",
     group_code: str = "",
     include_stocks: bool = True,
+    force_refresh: bool = False,
 ) -> Dict[str, Any]:
     normalized_market = market.upper()
     if normalized_market not in {"CN", "HK", "US"}:
         normalized_market = "CN"
 
     cached = INDUSTRY_HEATMAP_CACHE.get(normalized_market)
-    if cached and time.time() - cached[0] < INDUSTRY_HEATMAP_CACHE_TTL:
+    if not force_refresh and cached and time.time() - cached[0] < INDUSTRY_HEATMAP_CACHE_TTL:
         summary = cached[1]
     else:
-        gainers = _industry_rank(normalized_market, 0)
-        market_caps = _industry_rank(normalized_market, 3)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            gainers_future = executor.submit(_industry_rank, normalized_market, 0)
+            market_caps_future = executor.submit(_industry_rank, normalized_market, 3)
+            gainers = gainers_future.result()
+            market_caps = market_caps_future.result()
         cap_by_id: Dict[str, float] = {}
         for parent in market_caps.get("items") or []:
             for item in parent.get("lists") or []:
@@ -762,9 +880,33 @@ def fetch_industry_heatmap(
                     "industries": children,
                 })
 
+        activity_industries = sorted(
+            industries,
+            key=lambda item: item.get("marketValue") or 0,
+            reverse=True,
+        )[:INDUSTRY_ACTIVITY_LIMIT]
+        turnover_by_id = _fetch_industry_turnovers(
+            normalized_market,
+            activity_industries,
+        )
+        for industry in industries:
+            industry["turnover"] = turnover_by_id.get(str(industry.get("code") or ""))
+        for group in groups:
+            turnovers = [
+                item.get("turnover")
+                for item in group["industries"]
+                if item.get("turnover") is not None
+            ]
+            group["turnover"] = sum(turnovers) if turnovers else None
+
         summary = {
             "groups": groups,
             "industries": industries,
+            "turnoverCoverage": {
+                "industryCount": len(turnover_by_id),
+                "totalIndustryCount": len(industries),
+                "selection": "largest-market-value",
+            },
         }
         INDUSTRY_HEATMAP_CACHE[normalized_market] = (time.time(), summary)
 
@@ -836,4 +978,32 @@ def fetch_industry_detail(
             industry_code,
             industry_meta,
         ),
+    }
+
+
+def fetch_market_calendar(market: str, start: date, end: date) -> Dict[str, Any]:
+    normalized = market.upper()
+    if normalized not in {"CN", "HK", "US"}:
+        raise ValueError(f"unsupported market: {market}")
+    ctx = get_quote_context()
+    if not ctx or Market is None:
+        return {"market": normalized, "tradingDays": [], "halfTradingDays": [], "sessions": []}
+    market_value = {"CN": Market.CN, "HK": Market.HK, "US": Market.US}[normalized]
+    days = ctx.trading_days(market_value, start, end)
+    sessions = []
+    for market_session in ctx.trading_session():
+        if str(market_session.market).split(".")[-1] != normalized:
+            continue
+        for item in market_session.trade_sessions:
+            if str(item.trade_session).split(".")[-1] != "Intraday":
+                continue
+            sessions.append({
+                "open": item.begin_time.strftime("%H:%M"),
+                "close": item.end_time.strftime("%H:%M"),
+            })
+    return {
+        "market": normalized,
+        "tradingDays": [item.isoformat() for item in days.trading_days],
+        "halfTradingDays": [item.isoformat() for item in days.half_trading_days],
+        "sessions": sessions,
     }

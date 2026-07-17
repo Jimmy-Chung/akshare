@@ -95,9 +95,6 @@ export interface DashboardOverview {
     leaders: SectorHeatmapEntry[]
     laggards: SectorHeatmapEntry[]
   }
-  aWeights: WeightStockEntry[]
-  hkWeights: WeightStockEntry[]
-  usWeights: WeightStockEntry[]
   latestCommentary?: SessionCommentary
   newsDigest: NewsArticle[]
   updatedAt: string
@@ -105,7 +102,6 @@ export interface DashboardOverview {
   sourceSummary?: {
     global: SourceSummary
     majorIndices: SourceSummary
-    weights: SourceSummary
   }
   sourceStatus?: {
     longbridge?: {
@@ -123,6 +119,31 @@ export interface SourceSummary {
   total: number
   longbridge: number
   fallback: number
+}
+
+export interface AiProviderDefinition {
+  id: string
+  name: string
+  apiBase: string
+  model: string
+  configured: boolean
+  editableEndpoint: boolean
+}
+
+export interface AiProviderCatalog {
+  defaultProvider: string
+  providers: AiProviderDefinition[]
+}
+
+export interface AiAssistantResponse {
+  content: string
+  reportType: 'daily' | 'weekly'
+  session: SessionKey | 'weekly'
+  label: string
+  provider: string
+  model: string
+  generatedAt: string
+  dataPeriods: string[]
 }
 
 export interface SessionReport {
@@ -167,6 +188,10 @@ export interface ChartExportTarget {
   minimumImageHeight: number
   groupKey?: string
   indexCode?: string
+  sourceSnapshotId?: string
+  artifactPath?: string
+  artifactWidth?: number
+  artifactHeight?: number
 }
 
 export interface SectorRankingItem {
@@ -188,8 +213,46 @@ export interface HeatmapTimelineFrame {
   filename: string
   label: string
   capturedAt: string
+  scheduledAt?: string
+  trigger?: 'scheduled' | 'session-close' | 'manual'
+  snapshotId?: string
   size: number
   url: string
+  previewUrl?: string
+}
+
+export interface HeatmapSnapshotIndustry {
+  name: string
+  code: string
+  parentName: string
+  changePercent: number
+  marketValue: number
+  turnover?: number | null
+}
+
+export interface HeatmapSnapshotGroup {
+  name: string
+  code: string
+  changePercent: number
+  marketValue: number
+  turnover?: number | null
+  industries: HeatmapSnapshotIndustry[]
+}
+
+export interface HeatmapSnapshot {
+  schemaVersion: number
+  snapshotId: string
+  market: 'CN' | 'HK' | 'US'
+  scheduledAt?: string
+  capturedAt?: string
+  updatedAt?: string
+  groups?: HeatmapSnapshotGroup[]
+  industries: HeatmapSnapshotIndustry[]
+  turnoverCoverage?: {
+    industryCount: number
+    totalIndustryCount: number
+    selection: string
+  }
 }
 
 export interface HeatmapTimelineFramesResponse {

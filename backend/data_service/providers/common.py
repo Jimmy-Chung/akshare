@@ -4,7 +4,7 @@ import math
 import re
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import pandas as pd
 import requests
@@ -151,3 +151,21 @@ def merge_preferred_rows(
         for code in codes
         if code in primary_by_code or code in fallback_by_code
     ]
+
+
+def merge_with_lazy_fallback(
+    primary: List[Dict[str, Any]],
+    fallback_fetcher: Callable[[], List[Dict[str, Any]]],
+    order: List[str],
+) -> List[Dict[str, Any]]:
+    """Fetch fallback rows when any expected code is missing from the preferred source."""
+    primary_codes = {
+        str(item.get("code"))
+        for item in primary
+        if item.get("code")
+    }
+    if all(code in primary_codes for code in order):
+        return merge_preferred_rows(primary, [], order)
+
+    fallback_rows = fallback_fetcher()
+    return merge_preferred_rows(primary, fallback_rows, order)

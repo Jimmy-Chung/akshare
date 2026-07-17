@@ -86,6 +86,7 @@ interface LongbridgeSectorHeatmapProps {
   reportMode?: boolean
   generatedAt?: string
   snapshotId?: string
+  heatmapSnapshotId?: string
 }
 
 const MARKET_TABS: Array<{ key: MarketKey; label: string }> = [
@@ -160,6 +161,7 @@ export default function LongbridgeSectorHeatmap({
   reportMode = false,
   generatedAt,
   snapshotId = '',
+  heatmapSnapshotId = '',
 }: LongbridgeSectorHeatmapProps) {
   const [internalMarket, setInternalMarket] = useState<MarketKey>('CN')
   const market = controlledMarket ?? internalMarket
@@ -184,11 +186,13 @@ export default function LongbridgeSectorHeatmap({
     setSelectedStockCode('')
     try {
       const query = new URLSearchParams({ market: target })
-      if (!reportMode || !snapshotId) query.set('summary', '1')
       if (reportMode && snapshotId) query.set('snapshotId', snapshotId)
+      if (heatmapSnapshotId) query.set('snapshotId', heatmapSnapshotId)
       const url = reportMode && snapshotId
         ? `/api/reports/heatmap-snapshot?${query}`
-        : `/api/sector-heatmap?${query}`
+        : heatmapSnapshotId
+          ? `/api/heatmap-snapshots/snapshot?${query}`
+          : `/api/heatmap-snapshots/latest?${query}`
       const payload = await requestJson<SectorHeatmapSummary>(
         url,
       )
@@ -231,7 +235,7 @@ export default function LongbridgeSectorHeatmap({
 
   useEffect(() => {
     void loadSummary(market)
-  }, [market, reportMode, snapshotId])
+  }, [market, reportMode, snapshotId, heatmapSnapshotId])
 
   const industryDetail = drillIndustryCode
     ? detailCache[`${market}:${drillIndustryCode}`]
