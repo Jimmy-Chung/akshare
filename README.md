@@ -61,6 +61,15 @@ DEEPSEEK_MODEL=deepseek-v4-pro
 
 后端会优先读取仓库根目录 `.env`，也兼容旧变量名 `LONGPORT_*`。
 
+不想手工编辑 `.env` 时，可以使用隐藏输入的本机配置命令：
+
+```bash
+./start.sh configure-deepseek
+```
+
+该命令只在本机 `.env` 中写入 DeepSeek Provider、API 地址和 API Key，不会回显
+Key，并会在服务已运行时自动重启。模型名称继续由 AI 助手页面配置。
+
 如果没有固定 API 凭证，应用入口会显示 Longbridge OAuth 授权页。云端部署至少配置：
 
 ```bash

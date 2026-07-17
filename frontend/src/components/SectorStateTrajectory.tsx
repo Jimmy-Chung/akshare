@@ -14,11 +14,11 @@ import ReactEChartsCore from 'echarts-for-react/lib/core'
 import type {
   HeatmapSnapshot,
   HeatmapSnapshotGroup,
-  HeatmapTimelineFrame,
-  HeatmapTimelineFramesResponse,
+  HeatmapSnapshotHistoryItem,
+  HeatmapSnapshotHistoryResponse,
 } from '../types/market'
 import { formatError, requestJson } from '../utils/api'
-import { exportChartElement } from '../utils/chartExport'
+import { downloadChartImage, exportChartElement } from '../utils/chartExport'
 import {
   formatChineseAmount,
   formatDashboardTime,
@@ -51,7 +51,7 @@ interface ZoomWindow {
 }
 
 interface SnapshotFrame {
-  frame: HeatmapTimelineFrame
+  frame: HeatmapSnapshotHistoryItem
   snapshot: HeatmapSnapshot
 }
 
@@ -116,15 +116,13 @@ function frameLabel(snapshot: HeatmapSnapshot) {
   return timestamp.length >= 16 ? timestamp.slice(11, 16) : '当前'
 }
 
-function syntheticFrame(snapshot: HeatmapSnapshot): HeatmapTimelineFrame {
+function syntheticFrame(snapshot: HeatmapSnapshot): HeatmapSnapshotHistoryItem {
   return {
-    filename: `${snapshot.snapshotId}.json`,
     label: frameLabel(snapshot),
     capturedAt: snapshot.capturedAt || snapshot.scheduledAt || '',
     scheduledAt: snapshot.scheduledAt,
     snapshotId: snapshot.snapshotId,
-    size: 0,
-    url: '',
+    trigger: 'scheduled',
   }
 }
 
@@ -209,14 +207,14 @@ export default function SectorStateTrajectory({
           || exactSnapshot?.scheduledAt?.slice(0, 10)
           || exactSnapshot?.capturedAt?.slice(0, 10)
           || 'latest'
-        let eligible: HeatmapTimelineFrame[] = []
+        let eligible: HeatmapSnapshotHistoryItem[] = []
         try {
-          const timeline = await requestJson<HeatmapTimelineFramesResponse>(
-            `/api/heatmap-timeline/frames?market=${market}&date=${encodeURIComponent(requestedDate)}`,
+          const history = await requestJson<HeatmapSnapshotHistoryResponse>(
+            `/api/heatmap-snapshots/history?market=${market}&date=${encodeURIComponent(requestedDate)}`,
           )
-          eligible = timeline.frames.filter((frame) => frame.snapshotId)
-        } catch (timelineError) {
-          if (!exactSnapshot) throw timelineError
+          eligible = history.snapshots
+        } catch (historyError) {
+          if (!exactSnapshot) throw historyError
         }
         if (exactSnapshot && !eligible.some((frame) => frame.snapshotId === exactSnapshot.snapshotId)) {
           eligible.push(syntheticFrame(exactSnapshot))
@@ -421,6 +419,21 @@ export default function SectorStateTrajectory({
     .slice(0, 6)
   const chartId = `heatmap-${market.toLowerCase()}`
   const exportFilename = `${exportFilenamePrefix ? `${exportFilenamePrefix}-` : ''}${chartId}.png`
+  const currentExportFilename = `${chartId}-${(
+    currentFrame?.snapshot.scheduledAt?.slice(0, 10)
+      || currentFrame?.snapshot.capturedAt?.slice(0, 10)
+      || date
+      || 'current'
+  )}-${(currentFrame?.frame.label || 'current').replace(':', '')}.png`
+  const exportCurrentChart = () => {
+    const instance = chartRef.current?.getEchartsInstance()
+    if (!instance) return
+    downloadChartImage(instance.getDataURL({
+      type: 'png',
+      pixelRatio: 2,
+      backgroundColor: '#ffffff',
+    }), currentExportFilename)
+  }
   const zoomLevel = Math.round(10000 / Math.max(
     MIN_ZOOM_SPAN,
     Math.sqrt(
@@ -807,6 +820,14 @@ export default function SectorStateTrajectory({
           </p>
         </div>
         <div className="sector-state-toolbar">
+          <button
+            type="button"
+            className="chart-export-button sector-current-export-button"
+            aria-label="导出当前板块轨迹截图"
+            onClick={exportCurrentChart}
+          >
+            导出当前截图
+          </button>
           <label className="sector-category-select">
             <span>展开一级分类</span>
             <select
@@ -923,6 +944,7 @@ export default function SectorStateTrajectory({
       <div className="sector-state-layout">
         <div
           className="sector-state-chart-shell"
+          data-chart-id={`${chartId}-current`}
           data-y-axis-min={fixedYAxisRange.min}
           data-y-axis-max={fixedYAxisRange.max}
         >
@@ -961,6 +983,7 @@ export default function SectorStateTrajectory({
           </div>
           {visibleRows.length ? (
             <ReactEChartsCore
+              ref={chartRef}
               echarts={echarts}
               option={chartOption}
               notMerge
@@ -1072,7 +1095,7 @@ export default function SectorStateTrajectory({
         <div>
           {frames.map(({ frame }, index) => (
             <button
-              key={frame.filename}
+              key={frame.snapshotId}
               type="button"
               className={index === frameIndex ? 'is-active' : ''}
               onClick={() => {

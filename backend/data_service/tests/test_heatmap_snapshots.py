@@ -1,5 +1,6 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 import unittest
 from unittest.mock import patch
 
@@ -118,40 +119,42 @@ class HeatmapSnapshotTests(unittest.TestCase):
 
         self.assertEqual(len(files), 1)
 
-    def test_completed_image_is_available_to_consumers(self):
-        payload = {
-            "source": "Longbridge",
-            "groups": [{"name": "科技", "code": "group"}],
-            "industries": [{"name": "半导体", "code": "industry"}],
-        }
-        with (
-            TemporaryDirectory() as tmp,
-            patch.object(heatmap_snapshots, "ROOT", Path(tmp).resolve()),
-            patch.object(heatmap_snapshots, "SNAPSHOT_DIR", Path(tmp).resolve() / "snapshots"),
-            patch.object(
-                heatmap_snapshots.longbridge,
-                "fetch_industry_heatmap",
-                return_value=payload,
-            ),
-        ):
-            snapshot = heatmap_snapshots.create_heatmap_snapshot(
-                "US",
-                trigger="manual",
-                scheduled_at="2026-07-13T10:00:00-04:00",
-            )
-            image = Path(tmp).resolve() / "frame.png"
-            image.write_bytes(b"png")
-            heatmap_snapshots.attach_heatmap_image(
-                snapshot["snapshotId"],
-                str(image),
-                width=3200,
-                height=2692,
-                size=3,
-            )
-            latest = heatmap_snapshots.latest_heatmap_snapshot("US", require_image=True)
+    def test_history_and_dates_are_read_directly_from_snapshot_json(self):
+        with TemporaryDirectory() as tmp:
+            snapshot_dir = Path(tmp).resolve() / "snapshots"
+            date_dir = snapshot_dir / "US" / "2026-07-13"
+            date_dir.mkdir(parents=True)
+            for snapshot_id, scheduled_at, trigger, change in (
+                ("first", "2026-07-13T09:30:00-04:00", "scheduled", 0.2),
+                ("second", "2026-07-13T10:00:00-04:00", "scheduled", 0.4),
+                ("manual", "2026-07-13T10:15:00-04:00", "manual", 0.5),
+                ("zero", "2026-07-13T10:30:00-04:00", "scheduled", 0),
+            ):
+                (date_dir / f"{snapshot_id}.json").write_text(
+                    json.dumps({
+                        "snapshotId": snapshot_id,
+                        "market": "US",
+                        "trigger": trigger,
+                        "scheduledAt": scheduled_at,
+                        "capturedAt": scheduled_at,
+                        "industries": [{"code": "industry", "changePercent": change}],
+                    }),
+                    encoding="utf-8",
+                )
 
-        self.assertEqual(latest["snapshotId"], snapshot["snapshotId"])
-        self.assertEqual(latest["image"]["width"], 3200)
+            with patch.object(heatmap_snapshots, "SNAPSHOT_DIR", snapshot_dir):
+                dates = heatmap_snapshots.list_heatmap_snapshot_dates("US")
+                history = heatmap_snapshots.list_heatmap_snapshot_history("US", "2026-07-13")
+
+        self.assertEqual(dates["latestDate"], "2026-07-13")
+        self.assertEqual(dates["dates"], [{"date": "2026-07-13", "snapshotCount": 2}])
+        self.assertEqual(history["snapshotCount"], 2)
+        self.assertEqual([item["snapshotId"] for item in history["snapshots"]], ["first", "second"])
+        self.assertEqual([item["label"] for item in history["snapshots"]], ["09:30", "10:00"])
+
+    def test_invalid_history_date_is_rejected(self):
+        with self.assertRaises(heatmap_snapshots.HeatmapSnapshotError):
+            heatmap_snapshots.list_heatmap_snapshot_history("CN", "../../etc")
 
 
 if __name__ == "__main__":

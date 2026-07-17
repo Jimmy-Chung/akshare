@@ -5,7 +5,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
 from typing import Any, Dict, List, Optional
@@ -398,6 +398,90 @@ def fetch_report_indices(markets: Optional[List[str]] = None) -> List[Dict[str, 
         include_intraday=True,
         intraday_codes=intraday_codes,
     )
+
+
+def fetch_weekly_report_indices(
+    start_date: date,
+    end_date: date,
+) -> List[Dict[str, Any]]:
+    """Fetch broker-provided weekly candles for report indices."""
+    ctx = get_quote_context()
+    if not ctx or Period is None or AdjustType is None or TradeSessions is None:
+        return []
+
+    unique_items: Dict[str, Dict[str, str]] = {}
+    for item in [
+        *GLOBAL_INDEX_SYMBOLS,
+        *A_INDEX_SYMBOLS,
+        *HK_INDEX_SYMBOLS,
+        *US_INDEX_SYMBOLS,
+    ]:
+        unique_items.setdefault(item["code"], item)
+
+    query_start = start_date - timedelta(days=21)
+    result: List[Dict[str, Any]] = []
+    for item in unique_items.values():
+        try:
+            candles = sorted(
+                ctx.history_candlesticks_by_date(
+                    item["symbol"],
+                    Period.Week,
+                    AdjustType.NoAdjust,
+                    query_start,
+                    end_date,
+                    TradeSessions.Intraday,
+                ),
+                key=lambda candle: candle.timestamp,
+            )
+        except Exception as exc:
+            logger.warning("Longbridge 周线%s获取失败: %s", item["code"], exc)
+            continue
+
+        target_index = next(
+            (
+                index
+                for index in range(len(candles) - 1, -1, -1)
+                if start_date <= candles[index].timestamp.date() <= end_date
+            ),
+            None,
+        )
+        if target_index is None:
+            continue
+        candle = candles[target_index]
+        previous_close = (
+            safe_float(candles[target_index - 1].close, None)
+            if target_index > 0
+            else None
+        )
+        close = safe_float(candle.close, None)
+        if close is None:
+            continue
+        change_amount = close - previous_close if previous_close is not None else None
+        result.append({
+            "name": item["name"],
+            "code": item["code"],
+            "barStartDate": candle.timestamp.date().isoformat(),
+            "barEndDate": min(
+                candle.timestamp.date() + timedelta(days=6),
+                end_date,
+            ).isoformat(),
+            "open": safe_float(candle.open, None),
+            "high": safe_float(candle.high, None),
+            "low": safe_float(candle.low, None),
+            "close": close,
+            "previousWeekClose": previous_close,
+            "changeAmount": change_amount,
+            "changePercent": compute_change_percent(
+                close,
+                change_amount,
+                0,
+            ) if change_amount is not None else None,
+            "volume": safe_float(candle.volume, None),
+            "turnover": safe_float(candle.turnover, None),
+            "source": "Longbridge Weekly Candlestick",
+            "isFallback": False,
+        })
+    return result
 
 
 def fetch_a_weight_stocks() -> List[Dict[str, Any]]:

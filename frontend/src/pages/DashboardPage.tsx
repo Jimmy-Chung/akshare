@@ -3,7 +3,11 @@ import GlobalOverviewBar from '../components/GlobalOverviewBar'
 import IndicesSection from '../components/IndicesSection'
 import SectorStateTrajectory from '../components/SectorStateTrajectory'
 import { InlineError } from '../components/StateBlocks'
-import type { DashboardOverview, MarketIndexGroup } from '../types/market'
+import type {
+  DashboardOverview,
+  HeatmapSnapshotDatesResponse,
+  MarketIndexGroup,
+} from '../types/market'
 import { formatError, requestJson } from '../utils/api'
 import { formatDashboardTime } from '../utils/market'
 
@@ -22,13 +26,32 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardOverview | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
-  const [refreshingHeatmap, setRefreshingHeatmap] = useState(false)
-  const [heatmapVersion, setHeatmapVersion] = useState(0)
+  const [heatmapDates, setHeatmapDates] = useState<HeatmapSnapshotDatesResponse | null>(null)
+  const [heatmapDate, setHeatmapDate] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [market, setMarket] = useState<DashboardMarket>(() => {
     const requested = new URLSearchParams(window.location.search).get('market')?.toUpperCase()
     return requested === 'HK' || requested === 'US' ? requested : 'CN'
   })
+
+  useEffect(() => {
+    if (heatmapExportMode) return undefined
+    let cancelled = false
+    requestJson<HeatmapSnapshotDatesResponse>(`/api/heatmap-snapshots/dates?market=${market}`)
+      .then((payload) => {
+        if (cancelled) return
+        setHeatmapDates(payload)
+        setHeatmapDate(payload.latestDate)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setHeatmapDates(null)
+        setHeatmapDate('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [heatmapExportMode, market])
 
   const loadOverview = async (silent = false) => {
     if (silent) {
@@ -57,19 +80,6 @@ export default function DashboardPage() {
 
     return () => window.clearInterval(timer)
   }, [])
-
-  const refreshHeatmap = async () => {
-    setRefreshingHeatmap(true)
-    try {
-      await requestJson(`/api/heatmap-snapshots/refresh?market=${market}`, { method: 'POST' })
-      setHeatmapVersion((current) => current + 1)
-      setError(null)
-    } catch (err) {
-      setError(formatError(err))
-    } finally {
-      setRefreshingHeatmap(false)
-    }
-  }
 
   const groups: MarketIndexGroup[] = [
     {
@@ -123,6 +133,19 @@ export default function DashboardPage() {
   const fallbackCount =
     (data?.sourceSummary?.global.fallback ?? 0)
     + (data?.sourceSummary?.majorIndices.fallback ?? 0)
+  const indexRows = [
+    ...(data?.globalIndices ?? []),
+    ...(data?.majorIndices.aShares ?? []),
+    ...(data?.majorIndices.hk ?? []),
+    ...(data?.majorIndices.us ?? []),
+  ]
+  const indexSources = Array.from(new Set(indexRows.map((item) => item.source).filter(Boolean)))
+  const fallbackSources = Array.from(new Set(
+    indexRows
+      .filter((item) => item.isFallback)
+      .map((item) => item.source)
+      .filter(Boolean),
+  ))
 
   return (
     <div className="page-layout">
@@ -133,19 +156,8 @@ export default function DashboardPage() {
           <p>统一展示全球指数、三地核心指数、板块状态轨迹与自动点评。</p>
         </div>
         <div className="hero-actions">
-          <div className="source-pills">
-            <span className="pill">
-              行情 长桥优先{fallbackCount > 0 ? ` · ${fallbackCount} 项备用` : ''}
-            </span>
-            <span className="pill">{longbridgeLabel}</span>
-            <span className="pill">板块 Longbridge</span>
-            <span className="pill">报告 AI Provider</span>
-          </div>
           <div className="hero-tools">
             <span className="meta-text">最近更新 {formatDashboardTime(data?.updatedAt)}</span>
-            <button type="button" className="primary-button" onClick={refreshHeatmap} disabled={refreshingHeatmap}>
-              {refreshingHeatmap ? '生成热点图中' : '立即刷新热点图'}
-            </button>
             <button type="button" className="ghost-button" onClick={() => loadOverview(true)} disabled={refreshing}>
               {refreshing ? '刷新中' : '刷新指数'}
             </button>
@@ -187,16 +199,79 @@ export default function DashboardPage() {
           kicker="Market Indices"
           loading={loading && !data}
         />
+        {!heatmapExportMode ? (
+          <div className="heatmap-review-bar">
+            <div>
+              <strong>热点回顾</strong>
+              <span>
+                {heatmapDates?.timezoneLabel || (market === 'US' ? '纽约时间' : '北京时间')}
+                交易日归档
+              </span>
+            </div>
+            <label>
+              <span>选择日期</span>
+              <select
+                value={heatmapDate}
+                onChange={(event) => setHeatmapDate(event.target.value)}
+                disabled={!heatmapDates?.dates.length}
+              >
+                {!heatmapDates?.dates.length ? <option value="">暂无历史数据</option> : null}
+                {heatmapDates?.dates.map((item) => (
+                  <option key={item.date} value={item.date}>
+                    {item.date}（{item.snapshotCount} 个快照）
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ) : null}
         <SectorStateTrajectory
-          key={`${market}:${heatmapVersion}:${heatmapSnapshotId}`}
+          key={`${market}:${heatmapDate}:${heatmapSnapshotId}`}
           market={market}
+          date={heatmapDate}
           snapshotId={heatmapSnapshotId}
           reportMode={heatmapExportMode}
           exportFilenamePrefix={exportSession}
-          refreshVersion={heatmapVersion}
         />
       </section>
       {error && data ? <InlineError message={`局部刷新失败：${error}`} onRetry={() => loadOverview(true)} /> : null}
+      {!heatmapExportMode ? (
+        <div className="dashboard-source-tip-wrap">
+          <details className="dashboard-source-tip">
+            <summary aria-label="查看当前接口与数据源">
+              <span className="dashboard-source-tip__chevron" aria-hidden="true" />
+              数据来源
+            </summary>
+            <div className="dashboard-source-tip__popover">
+              <strong>当前接口与数据源</strong>
+              <dl>
+                <div>
+                  <dt>指数行情</dt>
+                  <dd>{indexSources.length ? indexSources.join('、') : '等待数据'}</dd>
+                </div>
+                <div>
+                  <dt>取数策略</dt>
+                  <dd>
+                    Longbridge 优先
+                    {fallbackCount > 0
+                      ? `，${fallbackCount} 项由 ${fallbackSources.join('、') || '备用接口'} 补齐`
+                      : '，当前没有使用备用接口'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>板块状态</dt>
+                  <dd>Longbridge 统一快照</dd>
+                </div>
+                <div>
+                  <dt>连接状态</dt>
+                  <dd>{longbridgeLabel}</dd>
+                </div>
+              </dl>
+              <span>更新时间 {formatDashboardTime(data?.updatedAt)}</span>
+            </div>
+          </details>
+        </div>
+      ) : null}
     </div>
   )
 }

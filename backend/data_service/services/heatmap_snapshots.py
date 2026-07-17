@@ -20,6 +20,11 @@ MARKET_TIMEZONES = {
     "HK": "Asia/Hong_Kong",
     "US": "America/New_York",
 }
+MARKET_TIMEZONE_LABELS = {
+    "CN": "北京时间",
+    "HK": "北京时间",
+    "US": "纽约时间",
+}
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: Dict[str, threading.Lock] = {}
 FRESHNESS_ATTEMPTS = 6
@@ -58,6 +63,13 @@ def _snapshot_files(market: str) -> list[Path]:
     return sorted(market_dir.glob("????-??-??/*.json"), reverse=True) if market_dir.exists() else []
 
 
+def _validated_date_key(value: str) -> str:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+    except ValueError as exc:
+        raise HeatmapSnapshotError(f"invalid heatmap date: {value}") from exc
+
+
 def _read(path: Path) -> Dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -84,6 +96,88 @@ def _all_zero(payload: Dict[str, Any]) -> bool:
         abs(float(item.get("changePercent") or 0)) <= ZERO_EPSILON
         for item in industries
     )
+
+
+def _history_eligible(payload: Dict[str, Any]) -> bool:
+    if payload.get("trigger") not in {"scheduled", "session-close"}:
+        return False
+    if not payload.get("snapshotId") or not (payload.get("industries") or []):
+        return False
+    return not _all_zero(payload)
+
+
+def _snapshot_timestamp(payload: Dict[str, Any]) -> str:
+    return str(payload.get("scheduledAt") or payload.get("capturedAt") or "")
+
+
+def _history_items(market: str, date_key: str) -> list[Dict[str, Any]]:
+    date_dir = SNAPSHOT_DIR / market / date_key
+    by_slot: Dict[str, Dict[str, Any]] = {}
+    for path in sorted(date_dir.glob("*.json")) if date_dir.exists() else []:
+        payload = _read(path)
+        if not _history_eligible(payload):
+            continue
+        slot = _snapshot_timestamp(payload)
+        if not slot:
+            continue
+        current = by_slot.get(slot)
+        captured_at = str(payload.get("capturedAt") or "")
+        if current is None or captured_at >= str(current.get("capturedAt") or ""):
+            by_slot[slot] = payload
+    return sorted(by_slot.values(), key=_snapshot_timestamp)
+
+
+def list_heatmap_snapshot_dates(market: str) -> Dict[str, Any]:
+    normalized = _market(market)
+    market_dir = SNAPSHOT_DIR / normalized
+    dates = []
+    if market_dir.exists():
+        for item in market_dir.iterdir():
+            if not item.is_dir():
+                continue
+            try:
+                date_key = _validated_date_key(item.name)
+            except HeatmapSnapshotError:
+                continue
+            snapshots = _history_items(normalized, date_key)
+            if snapshots:
+                dates.append({"date": date_key, "snapshotCount": len(snapshots)})
+    dates.sort(key=lambda item: item["date"], reverse=True)
+    return {
+        "market": normalized,
+        "timezone": MARKET_TIMEZONES[normalized],
+        "timezoneLabel": MARKET_TIMEZONE_LABELS[normalized],
+        "latestDate": dates[0]["date"] if dates else "",
+        "dates": dates,
+    }
+
+
+def list_heatmap_snapshot_history(
+    market: str,
+    target_date: str = "",
+) -> Dict[str, Any]:
+    normalized = _market(market)
+    if not target_date or target_date == "latest":
+        dates = list_heatmap_snapshot_dates(normalized)["dates"]
+        date_key = dates[0]["date"] if dates else ""
+    else:
+        date_key = _validated_date_key(target_date)
+    snapshots = _history_items(normalized, date_key) if date_key else []
+    return {
+        "market": normalized,
+        "date": date_key,
+        "snapshotCount": len(snapshots),
+        "snapshots": [
+            {
+                "snapshotId": item["snapshotId"],
+                "label": _snapshot_timestamp(item)[11:16] or "当前",
+                "scheduledAt": str(item.get("scheduledAt") or ""),
+                "capturedAt": str(item.get("capturedAt") or ""),
+                "trigger": str(item.get("trigger") or "scheduled"),
+            }
+            for item in snapshots
+        ],
+    }
 
 
 def _previous_scheduled_snapshot(market: str, scheduled_at: str) -> Dict[str, Any]:
@@ -183,7 +277,6 @@ def create_heatmap_snapshot(
             "groups": groups,
             "industries": industries,
             "turnoverCoverage": payload.get("turnoverCoverage") or {},
-            "image": None,
         }
         _atomic_json(SNAPSHOT_DIR / normalized / date_key / f"{snapshot_id}.json", snapshot)
         return snapshot
@@ -203,7 +296,6 @@ def latest_heatmap_snapshot(
     market: str,
     *,
     at_or_before: str = "",
-    require_image: bool = False,
     scheduled_only: bool = False,
 ) -> Dict[str, Any]:
     normalized = _market(market)
@@ -220,8 +312,6 @@ def latest_heatmap_snapshot(
                     continue
             except ValueError:
                 continue
-        if require_image and not (payload.get("image") or {}).get("path"):
-            continue
         if scheduled_only and payload.get("trigger") not in {"scheduled", "session-close"}:
             continue
         candidates.append(payload)
@@ -232,37 +322,3 @@ def latest_heatmap_snapshot(
         ),
         default={},
     )
-
-
-def attach_heatmap_image(
-    snapshot_id: str,
-    image_path: str,
-    *,
-    width: int,
-    height: int,
-    size: int,
-) -> Dict[str, Any]:
-    snapshot = get_heatmap_snapshot(snapshot_id)
-    if not snapshot:
-        raise HeatmapSnapshotError("heatmap snapshot not found")
-    path = Path(image_path).resolve()
-    try:
-        relative_path = path.relative_to(ROOT)
-    except ValueError as exc:
-        raise HeatmapSnapshotError("image path is outside project") from exc
-    if not path.exists():
-        raise HeatmapSnapshotError("heatmap image not found")
-    snapshot["image"] = {
-        "path": str(path),
-        "relativePath": str(relative_path),
-        "width": width,
-        "height": height,
-        "size": size,
-        "readyAt": datetime.now().astimezone().isoformat(timespec="seconds"),
-    }
-    date_key = str(snapshot.get("scheduledAt") or snapshot.get("capturedAt"))[:10]
-    _atomic_json(
-        SNAPSHOT_DIR / snapshot["market"] / date_key / f"{snapshot_id}.json",
-        snapshot,
-    )
-    return snapshot

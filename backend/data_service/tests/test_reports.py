@@ -5,6 +5,7 @@ from services.reports import (
     REPORT_SCHEMA_VERSION,
     _chart_exports,
     build_report,
+    get_cached_reports_between,
     get_report_by_snapshot,
     report_automation_config,
 )
@@ -108,6 +109,28 @@ class ReportRankingTests(unittest.TestCase):
 
         self.assertEqual(public_report["snapshotId"], "snapshot-close-9")
         self.assertNotIn("_sectorHeatmaps", public_report)
+
+    def test_cached_report_range_keeps_dates_and_sessions(self):
+        compatible = {
+            "schemaVersion": REPORT_SCHEMA_VERSION,
+            "snapshotId": "snapshot-1",
+            "globalOverview": [],
+            "majorMarkets": [],
+            "chartExports": [],
+            "sources": {},
+        }
+        cache = {
+            "2026-07-14": {"morning": {**compatible, "date": "2026-07-14"}},
+            "2026-07-15": {"close": {**compatible, "date": "2026-07-15"}},
+            "2026-07-18": {"close": {**compatible, "date": "2026-07-18"}},
+        }
+
+        with patch("services.reports._read_cache", return_value=cache):
+            reports = get_cached_reports_between("2026-07-14", "2026-07-15")
+
+        self.assertEqual([item["date"] for item in reports], ["2026-07-14", "2026-07-15"])
+        self.assertEqual(list(reports[0]["sessions"]), ["morning"])
+        self.assertEqual(list(reports[1]["sessions"]), ["close"])
 
 
 if __name__ == "__main__":

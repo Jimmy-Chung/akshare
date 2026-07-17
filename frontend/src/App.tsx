@@ -16,6 +16,26 @@ const tabFromHash = (): AppTab => (
   window.location.hash === '#assistant' ? 'assistant' : 'dashboard'
 )
 
+function DashboardIcon() {
+  return (
+    <svg className="app-icon" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="3" y="3" width="7" height="7" rx="2" />
+      <rect x="14" y="3" width="7" height="7" rx="2" />
+      <rect x="3" y="14" width="7" height="7" rx="2" />
+      <rect x="14" y="14" width="7" height="7" rx="2" />
+    </svg>
+  )
+}
+
+function AssistantIcon() {
+  return (
+    <svg className="app-icon" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 3.25c.5 3.76 2.49 5.75 6.25 6.25C14.49 10 12.5 11.99 12 15.75 11.5 11.99 9.51 10 5.75 9.5 9.51 9 11.5 7.01 12 3.25Z" />
+      <path d="M18.5 15.25c.2 1.65 1.1 2.55 2.75 2.75-1.65.2-2.55 1.1-2.75 2.75-.2-1.65-1.1-2.55-2.75-2.75 1.65-.2 2.55-1.1 2.75-2.75Z" />
+    </svg>
+  )
+}
+
 function App() {
   const [connected, setConnected] = useState(false)
   const [activeTab, setActiveTab] = useState<AppTab>(tabFromHash)
@@ -45,12 +65,16 @@ function App() {
     <div className="app-shell">
       <header className="app-topbar">
         <div className="brand-block">
-          <span className="brand-kicker">Finogeeks Market Terminal</span>
-          <h1>长桥主源行情看板</h1>
-          <p>全球指数、三地主要市场、板块状态轨迹与 AI 市场报告</p>
+          <span className="brand-mark" aria-hidden="true">
+            <svg className="app-icon" width="21" height="21" viewBox="0 0 24 24" focusable="false">
+              <path d="M4 17.5 9 12l3.25 3.25L20 7.5" />
+              <path d="M15.5 7.5H20V12" />
+            </svg>
+          </span>
+          <h1>Financial dashboard</h1>
         </div>
         {!reportExportRoute ? (
-          <nav className="page-tabs app-primary-nav" aria-label="主导航">
+          <nav className="page-tabs app-primary-nav app-primary-nav--desktop" aria-label="主导航">
             <a
               className={activeTab === 'dashboard' ? 'page-tab is-active' : 'page-tab'}
               href="#dashboard"
@@ -85,6 +109,27 @@ function App() {
           </>
         )}
       </main>
+
+      {!reportExportRoute ? (
+        <nav className="mobile-tab-bar" aria-label="底部导航">
+          <a
+            className={activeTab === 'dashboard' ? 'mobile-tab is-active' : 'mobile-tab'}
+            href="#dashboard"
+            aria-current={activeTab === 'dashboard' ? 'page' : undefined}
+          >
+            <DashboardIcon />
+            <span>看板</span>
+          </a>
+          <a
+            className={activeTab === 'assistant' ? 'mobile-tab is-active' : 'mobile-tab'}
+            href="#assistant"
+            aria-current={activeTab === 'assistant' ? 'page' : undefined}
+          >
+            <AssistantIcon />
+            <span>AI 助手</span>
+          </a>
+        </nav>
+      ) : null}
     </div>
   )
 }

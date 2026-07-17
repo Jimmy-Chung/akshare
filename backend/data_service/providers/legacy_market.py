@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -37,6 +38,15 @@ TRADINGVIEW_COLUMNS = [
     "high",
     "low",
     "volume",
+]
+TRADINGVIEW_WEEKLY_COLUMNS = [
+    "open|1W",
+    "high|1W",
+    "low|1W",
+    "close|1W",
+    "change|1W",
+    "change_abs|1W",
+    "volume|1W",
 ]
 
 A_INDEX_SYMBOLS = [
@@ -276,6 +286,128 @@ def fetch_tradingview_indices(desired: List[Dict[str, str]]) -> List[Dict[str, A
             "source": "TradingView",
             "isFallback": True,
         })
+    return result
+
+
+def fetch_tradingview_weekly_indices(
+    desired: List[Dict[str, str]],
+    start_date: date,
+    end_date: date,
+) -> List[Dict[str, Any]]:
+    """Fetch the active weekly bar for indices Longbridge does not cover.
+
+    This endpoint is intentionally used only by the weekend finalization path. It
+    exposes the active calendar week's aggregate rather than arbitrary historical
+    weeks, so callers must not use it for backfills.
+    """
+    if not desired:
+        return []
+
+    symbol_map = {item["symbol"]: item for item in desired}
+    response = requests.post(
+        "https://scanner.tradingview.com/global/scan",
+        json={
+            "symbols": {"tickers": list(symbol_map), "query": {"types": []}},
+            "columns": TRADINGVIEW_WEEKLY_COLUMNS,
+        },
+        headers=TRADINGVIEW_HEADERS,
+        timeout=20,
+    )
+    response.raise_for_status()
+    result: List[Dict[str, Any]] = []
+    for row in response.json().get("data") or []:
+        item = symbol_map.get(str(row.get("s") or ""))
+        values = row.get("d") or []
+        if not item or len(values) < len(TRADINGVIEW_WEEKLY_COLUMNS):
+            continue
+        close = safe_float(values[3], None)
+        change_percent = safe_float(values[4], None)
+        change_amount = safe_float(values[5], None)
+        if close is None:
+            continue
+        previous_close = close - change_amount if change_amount is not None else None
+        result.append({
+            "name": item["name"],
+            "code": item["code"],
+            "barStartDate": start_date.isoformat(),
+            "barEndDate": end_date.isoformat(),
+            "open": safe_float(values[0], None),
+            "high": safe_float(values[1], None),
+            "low": safe_float(values[2], None),
+            "close": close,
+            "previousWeekClose": previous_close,
+            "changeAmount": change_amount,
+            "changePercent": change_percent,
+            "volume": safe_float(values[6], None),
+            "turnover": None,
+            "source": "TradingView Weekly Aggregate",
+            "isFallback": True,
+        })
+    return result
+
+
+def _aggregate_daily_week(
+    frame: pd.DataFrame,
+    item: Dict[str, str],
+    start_date: date,
+    end_date: date,
+) -> Optional[Dict[str, Any]]:
+    if frame.empty or "date" not in frame.columns or "close" not in frame.columns:
+        return None
+    normalized = frame.copy()
+    normalized["date"] = pd.to_datetime(normalized["date"], errors="coerce").dt.date
+    normalized = normalized.dropna(subset=["date", "close"]).sort_values("date")
+    target = normalized[
+        (normalized["date"] >= start_date) & (normalized["date"] <= end_date)
+    ]
+    previous = normalized[normalized["date"] < start_date]
+    if target.empty or previous.empty:
+        return None
+    close = safe_float(target.iloc[-1]["close"], None)
+    previous_close = safe_float(previous.iloc[-1]["close"], None)
+    if close is None or previous_close is None:
+        return None
+    change_amount = close - previous_close
+    return {
+        "name": item["name"],
+        "code": item["code"],
+        "barStartDate": start_date.isoformat(),
+        "barEndDate": end_date.isoformat(),
+        "open": safe_float(target.iloc[0].get("open"), None),
+        "high": safe_float(target["high"].max(), None) if "high" in target else None,
+        "low": safe_float(target["low"].min(), None) if "low" in target else None,
+        "close": close,
+        "previousWeekClose": previous_close,
+        "changeAmount": change_amount,
+        "changePercent": change_amount / previous_close * 100 if previous_close else None,
+        "volume": safe_float(target["volume"].sum(), None) if "volume" in target else None,
+        "turnover": safe_float(target["amount"].sum(), None) if "amount" in target else None,
+        "source": "Sina Daily Weekly Aggregate",
+        "isFallback": True,
+    }
+
+
+def fetch_sina_weekly_indices(
+    desired: List[Dict[str, str]],
+    start_date: date,
+    end_date: date,
+) -> List[Dict[str, Any]]:
+    """Aggregate CN/HK daily index history into finalized weekly bars."""
+    def fetch_one(item: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        if item["market"] == "CN":
+            frame = ak.stock_zh_index_daily(symbol=item["symbol"])
+        else:
+            frame = ak.stock_hk_index_daily_sina(symbol=item["symbol"])
+        return _aggregate_daily_week(frame, item, start_date, end_date)
+
+    result: List[Dict[str, Any]] = []
+    # The HK decoder embeds V8 and is not thread-safe inside one Python process.
+    for item in desired:
+        try:
+            if normalized := fetch_one(item):
+                result.append(normalized)
+        except Exception as exc:
+            logger.warning("获取新浪周线%s失败: %s", item["code"], exc)
     return result
 
 

@@ -4,12 +4,11 @@ import json
 import logging
 import os
 import secrets
-import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 from urllib.parse import urlencode
 
-from flask import Flask, jsonify, redirect, request, send_file, session
+from flask import Flask, jsonify, redirect, request, session
 from flask_cors import CORS
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -20,22 +19,21 @@ from services.dashboard import build_dashboard_overview
 from services.ai_assistant import (
     AssistantConfigurationError,
     AssistantProviderError,
-    generate_market_report,
+    generate_assistant_response,
     provider_catalog,
 )
-from services.heatmap_timeline import (
-    HeatmapTimelineError,
-    list_heatmap_timeline_frames,
-    render_heatmap_timeline_video,
-    resolve_frame_path,
-    resolve_frame_preview_path,
+from services.market_query import (
+    MarketQueryError,
+    MarketQueryNotFound,
+    execute_market_query,
 )
 from services.heatmap_snapshots import (
     HeatmapSnapshotError,
-    attach_heatmap_image,
     create_heatmap_snapshot,
     get_heatmap_snapshot,
     latest_heatmap_snapshot,
+    list_heatmap_snapshot_dates,
+    list_heatmap_snapshot_history,
 )
 from services.reports import (
     get_history_report,
@@ -46,6 +44,12 @@ from services.reports import (
     regenerate_report,
     report_automation_config,
     report_schedule,
+)
+from services.weekly_reports import (
+    WeeklyReportError,
+    capture_weekly_market_context,
+    get_cached_weekly_market_context,
+    weekly_period_for_date,
 )
 
 def _load_flask_secret() -> str:
@@ -159,12 +163,55 @@ def assistant_providers():
 def assistant_chat():
     payload = request.get_json(silent=True) or {}
     try:
-        return jsonify(generate_market_report(payload, _public_app_url()))
+        return jsonify(generate_assistant_response(payload, _public_app_url()))
+    except MarketQueryNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
+    except MarketQueryError as exc:
+        return jsonify({"error": str(exc)}), 422
     except AssistantConfigurationError as exc:
         return jsonify({"error": str(exc)}), 422
     except AssistantProviderError as exc:
         logger.warning("AI 市场助手调用失败: %s", exc)
         return jsonify({"error": str(exc)}), 502
+
+
+@app.route("/api/market-query/execute", methods=["POST"])
+def market_query_execute():
+    payload = request.get_json(silent=True) or {}
+    raw_query = payload.get("query") if isinstance(payload.get("query"), dict) else payload
+    try:
+        return jsonify(execute_market_query(raw_query))
+    except MarketQueryNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
+    except MarketQueryError as exc:
+        return jsonify({"error": str(exc)}), 422
+
+
+@app.route("/api/weekly-reports/generate", methods=["POST"])
+def weekly_reports_generate():
+    from datetime import date
+
+    anchor_value = request.args.get("date") or date.today().isoformat()
+    try:
+        return jsonify(capture_weekly_market_context(date.fromisoformat(anchor_value)))
+    except ValueError:
+        return jsonify({"error": "date 必须使用 YYYY-MM-DD 格式"}), 422
+    except WeeklyReportError as exc:
+        return jsonify({"error": str(exc)}), 409
+
+
+@app.route("/api/weekly-reports/captured", methods=["GET"])
+def weekly_reports_captured():
+    from datetime import date
+
+    anchor_value = request.args.get("date") or date.today().isoformat()
+    try:
+        context = get_cached_weekly_market_context(
+            weekly_period_for_date(date.fromisoformat(anchor_value))
+        )
+    except ValueError:
+        return jsonify({"error": "date 必须使用 YYYY-MM-DD 格式"}), 422
+    return jsonify(context) if context else (jsonify({"error": "该周周线尚未采集"}), 404)
 
 
 @app.route("/api/reports/latest", methods=["GET"])
@@ -210,43 +257,6 @@ def reports_schedule():
     return jsonify({"timezone": "Asia/Shanghai", "schedule": report_schedule()})
 
 
-@app.route("/api/heatmap-timeline/frames", methods=["GET"])
-def heatmap_timeline_frames():
-    market = request.args.get("market", "CN")
-    target_date = request.args.get("date", "")
-    try:
-        return jsonify(list_heatmap_timeline_frames(market, target_date))
-    except HeatmapTimelineError as exc:
-        return jsonify({"error": str(exc)}), 422
-
-
-@app.route("/api/heatmap-timeline/frame", methods=["GET"])
-def heatmap_timeline_frame():
-    market = request.args.get("market", "")
-    target_date = request.args.get("date", "")
-    filename = request.args.get("filename", "")
-    try:
-        return send_file(resolve_frame_path(market, target_date, filename), mimetype="image/png")
-    except HeatmapTimelineError as exc:
-        return jsonify({"error": str(exc)}), 404
-
-
-@app.route("/api/heatmap-timeline/preview", methods=["GET"])
-def heatmap_timeline_preview():
-    market = request.args.get("market", "")
-    target_date = request.args.get("date", "")
-    filename = request.args.get("filename", "")
-    try:
-        return send_file(
-            resolve_frame_preview_path(market, target_date, filename),
-            mimetype="image/png",
-            conditional=True,
-            max_age=31536000,
-        )
-    except HeatmapTimelineError as exc:
-        return jsonify({"error": str(exc)}), 404
-
-
 @app.route("/api/market-calendar", methods=["GET"])
 def market_calendar():
     from datetime import date
@@ -285,7 +295,6 @@ def latest_heatmap_snapshot_api():
         snapshot = latest_heatmap_snapshot(
             request.args.get("market", "CN"),
             at_or_before=request.args.get("before", ""),
-            require_image=request.args.get("requireImage", "") in {"1", "true", "yes"},
             scheduled_only=request.args.get("scheduledOnly", "") in {"1", "true", "yes"},
         )
     except HeatmapSnapshotError as exc:
@@ -299,48 +308,23 @@ def heatmap_snapshot_api():
     return jsonify(snapshot) if snapshot else (jsonify({"error": "未找到热点图快照"}), 404)
 
 
-@app.route("/api/heatmap-snapshots/image", methods=["POST"])
-def attach_heatmap_snapshot_image_api():
-    payload = request.get_json(silent=True) or {}
+@app.route("/api/heatmap-snapshots/dates", methods=["GET"])
+def heatmap_snapshot_dates_api():
     try:
-        return jsonify(attach_heatmap_image(
-            str(payload.get("snapshotId") or ""),
-            str(payload.get("path") or ""),
-            width=int(payload.get("width") or 0),
-            height=int(payload.get("height") or 0),
-            size=int(payload.get("size") or 0),
-        ))
-    except (HeatmapSnapshotError, TypeError, ValueError) as exc:
+        return jsonify(list_heatmap_snapshot_dates(request.args.get("market", "CN")))
+    except HeatmapSnapshotError as exc:
         return jsonify({"error": str(exc)}), 422
 
 
-@app.route("/api/heatmap-snapshots/refresh", methods=["POST"])
-def refresh_heatmap_snapshot_api():
-    market = request.args.get("market", "CN").upper()
-    if market not in {"CN", "HK", "US"}:
-        return jsonify({"error": "unsupported market"}), 422
-    script = Path(__file__).resolve().parents[2] / "tools" / "market_heatmap_timeline.py"
-    python_bin = os.getenv("AKSHARE_WATCHER_PYTHON_BIN", "/opt/homebrew/bin/python3")
-    port = {"CN": "9431", "HK": "9432", "US": "9433"}[market]
-    session_name = "us-night" if market == "US" else "close"
-    command = [
-        python_bin, str(script), "--market", market, "--session", session_name,
-        "--port", port, "--force", "--trigger", "manual", "capture",
-    ]
+@app.route("/api/heatmap-snapshots/history", methods=["GET"])
+def heatmap_snapshot_history_api():
     try:
-        completed = subprocess.run(
-            command,
-            cwd=str(script.parents[1]),
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        result = json.loads(completed.stdout) if completed.stdout.strip() else {"ok": True}
-        return jsonify({"ok": True, "snapshot": result})
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        logger.exception("立即刷新热点图失败: %s", exc)
-        return jsonify({"error": "热点图生成失败"}), 503
+        return jsonify(list_heatmap_snapshot_history(
+            request.args.get("market", "CN"),
+            request.args.get("date", ""),
+        ))
+    except HeatmapSnapshotError as exc:
+        return jsonify({"error": str(exc)}), 422
 
 
 def _codex_report_authorized() -> tuple[bool, str]:
@@ -395,24 +379,6 @@ def codex_reports_generate():
         return jsonify({"error": message}), status
     report_session = request.args.get("session") or latest_session()
     return jsonify(regenerate_report(report_session))
-
-
-@app.route("/api/codex/reports/heatmap-timeline/render", methods=["POST"])
-def codex_render_heatmap_timeline():
-    authorized, message = _codex_report_authorized()
-    if not authorized:
-        status = 503 if not os.getenv("CODEX_REPORT_API_TOKEN", "").strip() else 401
-        return jsonify({"error": message}), status
-    payload = request.get_json(silent=True) or {}
-    try:
-        result = render_heatmap_timeline_video(
-            str(payload.get("market") or ""),
-            str(payload.get("date") or ""),
-            float(payload.get("fps") or 2),
-        )
-        return jsonify(result)
-    except (TypeError, ValueError, HeatmapTimelineError) as exc:
-        return jsonify({"error": str(exc)}), 422
 
 
 @app.route("/api/news", methods=["GET"])
