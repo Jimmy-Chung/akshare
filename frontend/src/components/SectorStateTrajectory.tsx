@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { LineChart, LinesChart, ScatterChart } from 'echarts/charts'
 import {
   DataZoomComponent,
@@ -75,6 +75,7 @@ const TRACK_COLORS = ['#2563eb', '#7c3aed', '#f59e0b', '#0891b2', '#db2777']
 const PLAYBACK_INTERVAL_MS = 1100
 const MAX_MULTI_SELECTION = TRACK_COLORS.length
 const MIN_ZOOM_SPAN = 8
+const ZOOM_STATE_COMMIT_DELAY_MS = 120
 const REPORT_EXPORT_CHART_HEIGHT = 1800
 const FULL_ZOOM: ZoomWindow = {
   xStart: 0,
@@ -89,6 +90,13 @@ function resizeZoomRange(start: number, end: number, scale: number) {
   const center = (start + end) / 2
   const nextStart = Math.min(100 - nextSpan, Math.max(0, center - nextSpan / 2))
   return [nextStart, nextStart + nextSpan] as const
+}
+
+function zoomWindowsEqual(left: ZoomWindow, right: ZoomWindow) {
+  return Math.abs(left.xStart - right.xStart) < 0.0001
+    && Math.abs(left.xEnd - right.xEnd) < 0.0001
+    && Math.abs(left.yStart - right.yStart) < 0.0001
+    && Math.abs(left.yEnd - right.yEnd) < 0.0001
 }
 
 function median(values: number[]) {
@@ -109,6 +117,23 @@ function heatColor(changePercent: number) {
 function compactPercent(value: number) {
   const sign = value > 0 ? '+' : ''
   return `${sign}${value.toFixed(2)}%`
+}
+
+function RelativeTurnoverHelp({ tooltipId }: { tooltipId: string }) {
+  return (
+    <span className="metric-help">
+      <span className="metric-help__trigger" aria-hidden="true">?</span>
+      <span className="metric-help__tooltip" id={tooltipId} role="tooltip">
+        <strong>什么是相对换手？</strong>
+        <span>
+          先用板块累计成交额除以板块市值，再除以当前时点所有已覆盖板块该比值的中位数。
+        </span>
+        <span>
+          1.0x 代表市场中位水平；2.0x 约为中位数的两倍，0.5x 约为一半。它衡量相对交易活跃度，不是绝对换手率。
+        </span>
+      </span>
+    </span>
+  )
 }
 
 function frameLabel(snapshot: HeatmapSnapshot) {
@@ -190,7 +215,51 @@ export default function SectorStateTrajectory({
   const [zoomWindow, setZoomWindow] = useState<ZoomWindow>(FULL_ZOOM)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [immersive, setImmersive] = useState(false)
+  const relativeTurnoverHelpId = useId()
   const chartRef = useRef<ReactEChartsCore | null>(null)
+  const cardRef = useRef<HTMLElement | null>(null)
+  const nativeFullscreenRef = useRef(false)
+  const zoomWindowRef = useRef<ZoomWindow>({ ...FULL_ZOOM })
+  const zoomCommitTimerRef = useRef<number | null>(null)
+  const activeChartPointersRef = useRef(new Set<number>())
+  const chartZoomChangedRef = useRef(false)
+
+  const clearZoomCommitTimer = () => {
+    if (zoomCommitTimerRef.current == null) return
+    window.clearTimeout(zoomCommitTimerRef.current)
+    zoomCommitTimerRef.current = null
+  }
+
+  const commitPendingZoomWindow = () => {
+    clearZoomCommitTimer()
+    const next = zoomWindowRef.current
+    setZoomWindow((current) => (
+      zoomWindowsEqual(current, next) ? current : { ...next }
+    ))
+  }
+
+  const applyZoomWindow = (next: ZoomWindow) => {
+    clearZoomCommitTimer()
+    zoomWindowRef.current = next
+    setZoomWindow(next)
+  }
+
+  const scheduleZoomWindowCommit = () => {
+    clearZoomCommitTimer()
+    zoomCommitTimerRef.current = window.setTimeout(() => {
+      zoomCommitTimerRef.current = null
+      const next = zoomWindowRef.current
+      setZoomWindow((current) => (
+        zoomWindowsEqual(current, next) ? current : { ...next }
+      ))
+    }, ZOOM_STATE_COMMIT_DELAY_MS)
+  }
+
+  useEffect(() => () => {
+    clearZoomCommitTimer()
+    activeChartPointersRef.current.clear()
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -246,7 +315,7 @@ export default function SectorStateTrajectory({
         setHoveredCode('')
         setPlaying(false)
         setCategoryName('')
-        setZoomWindow({ ...FULL_ZOOM })
+        applyZoomWindow({ ...FULL_ZOOM })
         const turnoverFrameCount = loaded.filter((entry) => (
           entry.snapshot.industries.some((item) => item.turnover != null)
         )).length
@@ -278,6 +347,32 @@ export default function SectorStateTrajectory({
     return () => window.clearTimeout(timer)
   }, [frameIndex, frames.length, playing])
 
+  useEffect(() => {
+    if (!immersive) return undefined
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const resizeChart = () => chartRef.current?.getEchartsInstance().resize()
+    const firstFrame = window.requestAnimationFrame(resizeChart)
+    const resizeTimer = window.setTimeout(resizeChart, 260)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.cancelAnimationFrame(firstFrame)
+      window.clearTimeout(resizeTimer)
+    }
+  }, [immersive])
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement && nativeFullscreenRef.current) {
+        nativeFullscreenRef.current = false
+        setImmersive(false)
+      }
+      window.setTimeout(() => chartRef.current?.getEchartsInstance().resize(), 80)
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
   const selectSector = (code: string) => {
     if (!code) return
     setSelectedCodes((current) => {
@@ -293,10 +388,74 @@ export default function SectorStateTrajectory({
     setPlaying(true)
   }
 
+  const selectMomentumMode = () => {
+    setPlaying(false)
+    setMode('momentum')
+    applyZoomWindow({ ...FULL_ZOOM })
+  }
+
+  const selectTurnoverMode = () => {
+    let latestTurnoverFrame = -1
+    frames.forEach((entry, index) => {
+      if (entry.snapshot.industries.some((item) => item.turnover != null)) {
+        latestTurnoverFrame = index
+      }
+    })
+    setPlaying(false)
+    if (latestTurnoverFrame >= 0) setFrameIndex(latestTurnoverFrame)
+    setMode('turnover')
+    applyZoomWindow({ ...FULL_ZOOM })
+  }
+
+  const togglePlayback = () => {
+    if (playing) setPlaying(false)
+    else startPlayback()
+  }
+
+  const enterImmersive = async () => {
+    setImmersive(true)
+    try {
+      if (cardRef.current?.requestFullscreen && !document.fullscreenElement) {
+        await cardRef.current.requestFullscreen({ navigationUI: 'hide' })
+        nativeFullscreenRef.current = true
+      }
+    } catch {
+      nativeFullscreenRef.current = false
+    }
+    try {
+      const orientation = window.screen.orientation as ScreenOrientation & {
+        lock?: (value: string) => Promise<void>
+      }
+      await orientation.lock?.('landscape')
+    } catch {
+      // iOS Safari does not expose orientation.lock; portrait devices use the CSS fallback.
+    }
+    window.setTimeout(() => chartRef.current?.getEchartsInstance().resize(), 80)
+  }
+
+  const exitImmersive = async () => {
+    setImmersive(false)
+    try {
+      const orientation = window.screen.orientation as ScreenOrientation & { unlock?: () => void }
+      orientation.unlock?.()
+    } catch {
+      // Orientation unlock is best-effort across mobile browsers.
+    }
+    if (document.fullscreenElement) {
+      nativeFullscreenRef.current = false
+      try {
+        await document.exitFullscreen()
+      } catch {
+        // The CSS immersive state has already been cleared.
+      }
+    }
+    window.setTimeout(() => chartRef.current?.getEchartsInstance().resize(), 80)
+  }
+
   const selectCategory = (nextCategory: string) => {
     setPlaying(false)
     setCategoryName(nextCategory)
-    setZoomWindow({ ...FULL_ZOOM })
+    applyZoomWindow({ ...FULL_ZOOM })
     if (!nextCategory) return
     const largest = currentRows
       .filter(({ item }) => item.parentName === nextCategory)
@@ -305,32 +464,32 @@ export default function SectorStateTrajectory({
   }
 
   const changeZoom = (scale: number) => {
-    setZoomWindow((current) => {
-      const [xStart, xEnd] = resizeZoomRange(current.xStart, current.xEnd, scale)
-      const [yStart, yEnd] = resizeZoomRange(current.yStart, current.yEnd, scale)
-      return { xStart, xEnd, yStart, yEnd }
-    })
+    const current = zoomWindowRef.current
+    const [xStart, xEnd] = resizeZoomRange(current.xStart, current.xEnd, scale)
+    const [yStart, yEnd] = resizeZoomRange(current.yStart, current.yEnd, scale)
+    applyZoomWindow({ xStart, xEnd, yStart, yEnd })
   }
 
   const handleDataZoom = (params: any) => {
     const updates = Array.isArray(params?.batch) ? params.batch : [params]
-    setZoomWindow((current) => {
-      const next = { ...current }
-      updates.forEach((update: any) => {
-        if (!Number.isFinite(update?.start) || !Number.isFinite(update?.end)) return
-        const zoomId = String(update.dataZoomId ?? '')
-        const zoomIndex = Number(update.dataZoomIndex)
-        if (zoomId === 'trajectory-x-zoom' || zoomIndex === 0) {
-          next.xStart = update.start
-          next.xEnd = update.end
-        }
-        if (zoomId === 'trajectory-y-zoom' || zoomIndex === 1) {
-          next.yStart = update.start
-          next.yEnd = update.end
-        }
-      })
-      return next
+    const next = { ...zoomWindowRef.current }
+    updates.forEach((update: any) => {
+      if (!Number.isFinite(update?.start) || !Number.isFinite(update?.end)) return
+      const zoomId = String(update.dataZoomId ?? '')
+      const zoomIndex = Number(update.dataZoomIndex)
+      if (zoomId === 'trajectory-x-zoom' || zoomIndex === 0) {
+        next.xStart = update.start
+        next.xEnd = update.end
+      }
+      if (zoomId === 'trajectory-y-zoom' || zoomIndex === 1) {
+        next.yStart = update.start
+        next.yEnd = update.end
+      }
     })
+    if (zoomWindowsEqual(next, zoomWindowRef.current)) return
+    zoomWindowRef.current = next
+    chartZoomChangedRef.current = true
+    if (activeChartPointersRef.current.size === 0) scheduleZoomWindowCommit()
   }
 
   const baselineMarketValue = useMemo(() => {
@@ -611,7 +770,15 @@ export default function SectorStateTrajectory({
       tooltip: {
         trigger: 'item',
         formatter: (params: any) => {
-          if (params.seriesType === 'line') return `${params.seriesName}<br/>${params.value?.[2] ?? ''}`
+          if (params.seriesType === 'line') {
+            const point = params.value as [number, number, string] | undefined
+            const changePercent = Number(point?.[0])
+            return [
+              `<strong>${params.seriesName}</strong>`,
+              `时间：${point?.[2] ?? '--'}`,
+              `涨跌幅：${Number.isFinite(changePercent) ? compactPercent(changePercent) : '--'}`,
+            ].join('<br/>')
+          }
           const data = params.value as any[]
           const turnover = data[6] as number | null
           return [
@@ -810,7 +977,56 @@ export default function SectorStateTrajectory({
   }
 
   return (
-    <section className="surface-card sector-state-card">
+    <section
+      ref={cardRef}
+      className={immersive ? 'surface-card sector-state-card is-immersive' : 'surface-card sector-state-card'}
+    >
+      {immersive ? (
+        <div className="sector-immersive-bar">
+          <div className="sector-immersive-title">
+            <span>{MARKET_LABELS[market]}板块轨迹</span>
+            <strong>{currentFrame.frame.label}</strong>
+          </div>
+          <div className="sector-immersive-actions">
+            <div className="heatmap-mode-switcher session-switcher" aria-label="横屏轨迹指标切换">
+              <button
+                type="button"
+                className={mode === 'momentum' ? 'session-tab is-active' : 'session-tab'}
+                onClick={selectMomentumMode}
+              >
+                涨跌速度
+              </button>
+              <button
+                type="button"
+                className={mode === 'turnover' ? 'session-tab session-tab--with-help is-active' : 'session-tab session-tab--with-help'}
+                onClick={selectTurnoverMode}
+                disabled={!turnoverAvailable}
+                aria-label="相对换手"
+                aria-describedby={`${relativeTurnoverHelpId}-immersive`}
+              >
+                相对换手
+                <RelativeTurnoverHelp tooltipId={`${relativeTurnoverHelpId}-immersive`} />
+              </button>
+            </div>
+            <button
+              type="button"
+              className={playing ? 'ghost-button sector-immersive-play' : 'primary-button sector-immersive-play'}
+              onClick={togglePlayback}
+              disabled={frames.length < 2}
+            >
+              {playing ? '暂停' : '播放'}
+            </button>
+            <button
+              type="button"
+              className="ghost-button sector-immersive-exit"
+              onClick={() => void exitImmersive()}
+              aria-label="退出横屏全屏"
+            >
+              退出全屏
+            </button>
+          </div>
+        </div>
+      ) : null}
       <div className="section-heading sector-state-heading">
         <div>
           <span className="section-kicker">Sector State Map</span>
@@ -846,33 +1062,21 @@ export default function SectorStateTrajectory({
             <button
               type="button"
               className={mode === 'momentum' ? 'session-tab is-active' : 'session-tab'}
-              onClick={() => {
-                setPlaying(false)
-                setMode('momentum')
-                setZoomWindow({ ...FULL_ZOOM })
-              }}
+              onClick={selectMomentumMode}
             >
               涨跌速度
             </button>
             <button
               type="button"
-              className={mode === 'turnover' ? 'session-tab is-active' : 'session-tab'}
-              onClick={() => {
-                let latestTurnoverFrame = -1
-                frames.forEach((entry, index) => {
-                  if (entry.snapshot.industries.some((item) => item.turnover != null)) {
-                    latestTurnoverFrame = index
-                  }
-                })
-                setPlaying(false)
-                if (latestTurnoverFrame >= 0) setFrameIndex(latestTurnoverFrame)
-                setMode('turnover')
-                setZoomWindow({ ...FULL_ZOOM })
-              }}
+              className={mode === 'turnover' ? 'session-tab session-tab--with-help is-active' : 'session-tab session-tab--with-help'}
+              onClick={selectTurnoverMode}
               disabled={!turnoverAvailable}
               title={turnoverAvailable ? '成交额除以市值，再与当前市场中位数比较' : '等待新格式快照积累成交额'}
+              aria-label="相对换手"
+              aria-describedby={`${relativeTurnoverHelpId}-toolbar`}
             >
               相对换手
+              <RelativeTurnoverHelp tooltipId={`${relativeTurnoverHelpId}-toolbar`} />
             </button>
           </div>
           <div className="heatmap-mode-switcher session-switcher" aria-label="轨迹选择方式">
@@ -897,13 +1101,18 @@ export default function SectorStateTrajectory({
           <button
             type="button"
             className={playing ? 'ghost-button sector-play-button' : 'primary-button sector-play-button'}
-            onClick={() => {
-              if (playing) setPlaying(false)
-              else startPlayback()
-            }}
+            onClick={togglePlayback}
             disabled={frames.length < 2}
           >
             {playing ? '暂停播放' : '播放轨迹'}
+          </button>
+          <button
+            type="button"
+            className="ghost-button sector-landscape-button"
+            onClick={() => void enterImmersive()}
+            aria-label="横屏全屏查看板块轨迹"
+          >
+            横屏全屏
           </button>
         </div>
       </div>
@@ -974,7 +1183,7 @@ export default function SectorStateTrajectory({
               <button
                 type="button"
                 className="ghost-button sector-zoom-button"
-                onClick={() => setZoomWindow({ ...FULL_ZOOM })}
+                onClick={() => applyZoomWindow({ ...FULL_ZOOM })}
                 disabled={zoomIsFull}
               >
                 重置
@@ -984,21 +1193,51 @@ export default function SectorStateTrajectory({
           {visibleRows.length ? (
             <ReactEChartsCore
               ref={chartRef}
+              className="sector-state-echart"
               echarts={echarts}
               option={chartOption}
               notMerge
               lazyUpdate
               style={{ height: 520, width: '100%' }}
+              onPointerDown={(event) => {
+                activeChartPointersRef.current.add(event.pointerId)
+                chartZoomChangedRef.current = false
+                clearZoomCommitTimer()
+              }}
+              onPointerUp={(event) => {
+                activeChartPointersRef.current.delete(event.pointerId)
+                if (activeChartPointersRef.current.size > 0) return
+                commitPendingZoomWindow()
+                if (chartZoomChangedRef.current) setHoveredCode('')
+                chartZoomChangedRef.current = false
+              }}
+              onPointerCancel={(event) => {
+                activeChartPointersRef.current.delete(event.pointerId)
+                if (activeChartPointersRef.current.size > 0) return
+                commitPendingZoomWindow()
+                if (chartZoomChangedRef.current) setHoveredCode('')
+                chartZoomChangedRef.current = false
+              }}
+              onPointerLeave={(event) => {
+                if (!activeChartPointersRef.current.delete(event.pointerId)) return
+                if (activeChartPointersRef.current.size > 0) return
+                commitPendingZoomWindow()
+                if (chartZoomChangedRef.current) setHoveredCode('')
+                chartZoomChangedRef.current = false
+              }}
               onEvents={{
                 click: (params: any) => {
                   const code = params.value?.[4]
                   if (code) selectSector(String(code))
                 },
                 mouseover: (params: any) => {
+                  if (activeChartPointersRef.current.size > 0) return
                   const code = params.value?.[4]
                   if (code) setHoveredCode(String(code))
                 },
-                mouseout: () => setHoveredCode(''),
+                mouseout: () => {
+                  if (activeChartPointersRef.current.size === 0) setHoveredCode('')
+                },
                 datazoom: handleDataZoom,
               }}
             />

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List
 from urllib.parse import urlencode
 
-from flask import Flask, jsonify, redirect, request, session
+from flask import Flask, Response, jsonify, redirect, request, session, stream_with_context
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash
 
@@ -24,6 +24,7 @@ from services.ai_assistant import (
     AssistantConfigurationError,
     AssistantProviderError,
     generate_assistant_response,
+    generate_assistant_stream,
     provider_catalog,
 )
 from services.market_query import (
@@ -318,6 +319,29 @@ def assistant_providers():
 @app.route("/api/assistant/chat", methods=["POST"])
 def assistant_chat():
     payload = request.get_json(silent=True) or {}
+    if bool(payload.get("stream")):
+        @stream_with_context
+        def event_stream():
+            try:
+                for event in generate_assistant_stream(payload, _public_app_url()):
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except MarketQueryNotFound as exc:
+                yield f"data: {json.dumps({'type': 'error', 'error': str(exc), 'status': 404}, ensure_ascii=False)}\n\n"
+            except MarketQueryError as exc:
+                yield f"data: {json.dumps({'type': 'error', 'error': str(exc), 'status': 422}, ensure_ascii=False)}\n\n"
+            except AssistantConfigurationError as exc:
+                yield f"data: {json.dumps({'type': 'error', 'error': str(exc), 'status': 422}, ensure_ascii=False)}\n\n"
+            except AssistantProviderError as exc:
+                logger.warning("AI 市场助手流式调用失败: %s", exc)
+                yield f"data: {json.dumps({'type': 'error', 'error': str(exc), 'status': 502}, ensure_ascii=False)}\n\n"
+        return Response(
+            event_stream(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
     try:
         return jsonify(generate_assistant_response(payload, _public_app_url()))
     except MarketQueryNotFound as exc:

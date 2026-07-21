@@ -10,13 +10,16 @@ from services.ai_assistant import (
     AssistantConfigurationError,
     AssistantProviderError,
     _chat_url,
+    _compact_report,
     _normalize_model,
+    _provider_chat_stream,
     _provider_config,
     _report_date,
     _report_session,
     _report_type,
     _weekly_period,
     _weekly_report_context,
+    generate_assistant_stream,
     generate_market_report,
 )
 
@@ -52,6 +55,25 @@ class AiAssistantTests(unittest.TestCase):
     def test_report_keyword_selects_daily_or_weekly_template(self):
         self.assertEqual(_report_type("请生成日报"), "daily")
         self.assertEqual(_report_type("复盘一下本周周报"), "weekly")
+
+    def test_compact_report_preserves_recovery_time_and_note(self):
+        compact = _compact_report({
+            "date": "2026-07-20",
+            "label": "早报 09:30",
+            "generatedAt": "2026-07-20T10:53:00+08:00",
+            "dataAsOf": "2026-07-20T09:30:00+08:00",
+            "captureMode": "historical-minute-recovery",
+            "recoveryNote": "分钟线恢复",
+            "marketLabels": [],
+            "globalOverview": [],
+            "majorMarkets": [],
+            "chartExports": [],
+            "sources": {},
+        }, "http://127.0.0.1:3005")
+
+        self.assertEqual(compact["dataAsOf"], "2026-07-20T09:30:00+08:00")
+        self.assertEqual(compact["captureMode"], "historical-minute-recovery")
+        self.assertEqual(compact["recoveryNote"], "分钟线恢复")
 
     def test_quick_action_session_is_explicit_and_keyword_aware(self):
         self.assertEqual(_report_session({"session": "midday"}, "日报"), "midday")
@@ -178,6 +200,67 @@ class AiAssistantTests(unittest.TestCase):
             _chat_url("http://127.0.0.1:11434/v1"),
             "http://127.0.0.1:11434/v1/chat/completions",
         )
+
+    @patch("services.ai_assistant.requests.post")
+    def test_provider_stream_yields_only_content_deltas(self, mock_post):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=None)
+        response.iter_lines.return_value = [
+            'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+            'data: {"choices":[{"delta":{"content":"你"}}]}',
+            'data: {"choices":[{"delta":{"content":"好"}}]}',
+            "data: [DONE]",
+        ]
+        mock_post.return_value = response
+
+        chunks = list(_provider_chat_stream(
+            {"apiBase": "https://api.deepseek.com", "apiKey": "test-key", "model": "test"},
+            [{"role": "user", "content": "你好"}],
+        ))
+
+        self.assertEqual(chunks, ["你", "好"])
+        self.assertTrue(mock_post.call_args.kwargs["stream"])
+        self.assertTrue(mock_post.call_args.kwargs["json"]["stream"])
+
+    @patch("services.ai_assistant._provider_chat_stream")
+    @patch("services.ai_assistant.execute_market_query")
+    @patch("services.ai_assistant.plan_market_query")
+    @patch("services.ai_assistant._provider_config")
+    def test_query_stream_emits_status_deltas_and_final_response(
+        self,
+        mock_config,
+        mock_plan,
+        mock_execute,
+        mock_stream,
+    ):
+        mock_config.return_value = {
+            "name": "DeepSeek",
+            "model": "test-model",
+            "apiBase": "https://api.deepseek.com",
+            "apiKey": "test-key",
+        }
+        mock_plan.return_value = {
+            "intent": {"domain": "stock", "operation": "industry"},
+            "subjects": [],
+        }
+        mock_execute.return_value = {
+            "resultType": "stock_industry",
+            "data": {"items": []},
+            "meta": {"warnings": []},
+        }
+        mock_stream.return_value = iter(["# 腾讯", "\n行业：通信服务"])
+
+        events = list(generate_assistant_stream(
+            {"message": "腾讯属于什么行业？"},
+            "http://localhost:3005",
+        ))
+
+        self.assertEqual([event["type"] for event in events], [
+            "status", "status", "status", "delta", "delta", "done",
+        ])
+        self.assertEqual(events[-1]["response"]["content"], "# 腾讯\n行业：通信服务")
+        self.assertEqual(events[-1]["response"]["label"], "股票行业查询")
 
     @patch("services.ai_assistant._report_context")
     @patch("services.ai_assistant.requests.post")

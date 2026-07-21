@@ -23,6 +23,14 @@ type QuickAction = {
   session?: 'morning' | 'midday' | 'close' | 'us-night'
 }
 
+type AssistantStreamEvent = {
+  type: 'status' | 'delta' | 'done' | 'error'
+  message?: string
+  content?: string
+  error?: string
+  response?: AiAssistantResponse
+}
+
 const QUICK_ACTIONS: QuickAction[] = [
   { label: '早报', command: '请生成早报', session: 'morning' },
   { label: '午报', command: '请生成午报', session: 'midday' },
@@ -36,6 +44,8 @@ export default function AiMarketAssistant() {
   const [message, setMessage] = useState('')
   const [lastPrompt, setLastPrompt] = useState('')
   const [result, setResult] = useState<AiAssistantResponse | null>(null)
+  const [streamedContent, setStreamedContent] = useState('')
+  const [streamStatus, setStreamStatus] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [configurationOpen, setConfigurationOpen] = useState(false)
@@ -67,21 +77,73 @@ export default function AiMarketAssistant() {
     }
     setLastPrompt(quickAction?.label || prompt)
     setResult(null)
+    setStreamedContent('')
+    setStreamStatus('正在连接 AI 助手…')
     setLoading(true)
     setError(null)
     try {
-      const payload = await requestJson<AiAssistantResponse>('/api/assistant/chat', {
+      const response = await fetch('/api/assistant/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        },
         body: JSON.stringify({
           message: prompt,
           model,
           session: quickAction?.session,
           quickAction: Boolean(quickAction),
+          stream: true,
         }),
       })
-      setResult(payload)
-      setMessage('')
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: string } | null
+        throw new Error(payload?.error || `请求失败 ${response.status}`)
+      }
+      if (!response.body) {
+        throw new Error('浏览器不支持流式响应')
+      }
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let completed = false
+      const handleEvent = (event: AssistantStreamEvent) => {
+        if (event.type === 'status') {
+          setStreamStatus(event.message || '正在处理…')
+        } else if (event.type === 'delta' && event.content) {
+          setStreamedContent((previous) => previous + event.content)
+        } else if (event.type === 'done' && event.response) {
+          completed = true
+          setResult(event.response)
+          setStreamedContent('')
+          setStreamStatus('')
+          setMessage('')
+        } else if (event.type === 'error') {
+          throw new Error(event.error || '流式生成失败')
+        }
+      }
+      while (true) {
+        const { done, value } = await reader.read()
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+        let boundary = buffer.indexOf('\n\n')
+        while (boundary >= 0) {
+          const packet = buffer.slice(0, boundary)
+          buffer = buffer.slice(boundary + 2)
+          const data = packet
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trim())
+            .join('\n')
+          if (data) {
+            handleEvent(JSON.parse(data) as AssistantStreamEvent)
+          }
+          boundary = buffer.indexOf('\n\n')
+        }
+        if (done) break
+      }
+      if (!completed) {
+        throw new Error('流式响应意外结束，请重试')
+      }
     } catch (err) {
       setError(formatError(err))
     } finally {
@@ -112,14 +174,14 @@ export default function AiMarketAssistant() {
         <div className="ai-chat-messages" aria-live="polite">
           {!lastPrompt ? (
             <div className="ai-message ai-message--assistant">
-              快捷动作读取当天对应时段报告。也可以用自然语言查询历史报告、指数周线，以及一级或二级板块的轨迹变化。
+              快捷动作读取当天对应时段报告。也可以用自然语言查询历史报告、指数周线、板块轨迹，或一只股票所属的一、二级行业。
             </div>
           ) : (
             <div className="ai-message ai-message--user">{lastPrompt}</div>
           )}
 
-          {loading ? (
-            <div className="ai-message ai-message--assistant">正在读取固化数据并生成报告…</div>
+          {loading && streamStatus ? (
+            <div className="ai-message ai-message--assistant ai-message--status">{streamStatus}</div>
           ) : null}
 
           {error ? (
@@ -135,6 +197,16 @@ export default function AiMarketAssistant() {
               </div>
               <div className="assistant-markdown">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.content}</ReactMarkdown>
+              </div>
+            </div>
+          ) : null}
+
+          {loading && streamedContent ? (
+            <div className="ai-message ai-message--assistant ai-message--report">
+              <div className="assistant-result__meta"><span>正在输出</span></div>
+              <div className="assistant-markdown">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamedContent}</ReactMarkdown>
+                <span className="assistant-stream-caret" aria-label="正在生成" />
               </div>
             </div>
           ) : null}
@@ -171,7 +243,7 @@ export default function AiMarketAssistant() {
                   submit()
                 }
               }}
-              placeholder="例如：给我 7 月 15 日的午报"
+              placeholder="例如：贵州茅台属于哪个一、二级行业？"
               rows={2}
             />
             <button type="button" className="primary-button" onClick={() => submit()} disabled={loading}>

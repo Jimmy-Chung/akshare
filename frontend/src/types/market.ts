@@ -178,6 +178,9 @@ export interface SessionReport {
   scheduledAt: string
   date: string
   generatedAt: string
+  captureMode?: 'historical-minute-recovery'
+  dataAsOf?: string
+  recoveryNote?: string
   markets: Array<'CN' | 'HK' | 'US'>
   marketLabels: string[]
   globalOverview: GlobalMarketGroup[]

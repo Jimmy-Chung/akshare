@@ -122,7 +122,7 @@ export default function ReportPage() {
               {regenerating ? '生成中' : '重新生成'}
             </button>
             <span className="meta-text">
-              {report ? `${report.label} · ${formatReportDate(report.generatedAt)}` : '读取中'}
+              {report ? `${report.label} · ${formatReportDate(report.dataAsOf || report.generatedAt)}` : '读取中'}
             </span>
           </div>
         </div>
@@ -178,14 +178,20 @@ export default function ReportPage() {
               </div>
               <div>
                 <span>数据时间</span>
-                <strong>{formatReportDate(report.generatedAt)}</strong>
+                <strong>{formatReportDate(report.dataAsOf || report.generatedAt)}</strong>
               </div>
+              {report.captureMode === 'historical-minute-recovery' ? (
+                <div>
+                  <span>恢复时间</span>
+                  <strong>{formatReportDate(report.generatedAt)}</strong>
+                </div>
+              ) : null}
             </div>
           </section>
 
           <GlobalOverviewBar
             groups={report.globalOverview}
-            updatedAt={report.generatedAt}
+            updatedAt={report.dataAsOf || report.generatedAt}
           />
 
           <IndicesSection
@@ -203,6 +209,7 @@ export default function ReportPage() {
               <span>全球指数：{report.sources.globalIndices}</span>
               <span>主要指数：{report.sources.majorIndices}</span>
               <span>热点图：不属于报告数据包</span>
+              {report.recoveryNote ? <span>恢复说明：{report.recoveryNote}</span> : null}
             </div>
           </section>
         </>

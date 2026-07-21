@@ -10,6 +10,7 @@ VALID_OPERATIONS = {
     "report": {"get", "compare"},
     "weekly_index": {"get", "compare", "rank"},
     "sector": {"snapshot", "timeline", "compare", "rank", "children"},
+    "stock": {"industry"},
 }
 VALID_MARKETS = {"CN", "HK", "US"}
 VALID_SESSIONS = {"morning", "midday", "close", "us-night"}
@@ -44,7 +45,7 @@ def normalize_query_spec(raw: Dict[str, Any]) -> Dict[str, Any]:
     domain = str(intent.get("domain") or "").strip()
     operation = str(intent.get("operation") or "").strip()
     if domain not in VALID_OPERATIONS:
-        raise MarketQueryError("intent.domain 只支持 report、weekly_index 或 sector")
+        raise MarketQueryError("intent.domain 只支持 report、weekly_index、sector 或 stock")
     if operation not in VALID_OPERATIONS[domain]:
         raise MarketQueryError(f"{domain} 不支持 operation={operation}")
 
@@ -62,7 +63,9 @@ def normalize_query_spec(raw: Dict[str, Any]) -> Dict[str, Any]:
         if level not in {None, "", 1, 2, "1", "2"}:
             raise MarketQueryError("板块 level 只支持 1 或 2")
         normalized_subjects.append({
-            "type": str(subject.get("type") or ("sector" if domain == "sector" else "index")),
+            "type": str(subject.get("type") or (
+                "sector" if domain == "sector" else "stock" if domain == "stock" else "index"
+            )),
             "market": market,
             "level": int(level) if level not in {None, ""} else None,
             "name": str(subject.get("name") or "").strip(),
@@ -107,6 +110,16 @@ def normalize_query_spec(raw: Dict[str, Any]) -> Dict[str, Any]:
         raise MarketQueryError("sector.compare 至少需要两个板块")
     if domain == "sector" and operation == "rank" and not normalized_subjects[0]["market"]:
         raise MarketQueryError("sector.rank 必须指定市场")
+    if domain == "weekly_index":
+        if any(item["type"] != "index" for item in normalized_subjects):
+            raise MarketQueryError("weekly_index 只能使用 index 类型的 subject")
+        if any(not (item["id"] or item["name"]) for item in normalized_subjects):
+            raise MarketQueryError("weekly_index 的 subject 必须指定指数名称或代码")
+    if domain == "stock":
+        if not normalized_subjects:
+            raise MarketQueryError("stock.industry 必须指定股票名称或代码")
+        if any(not (item["id"] or item["name"]) for item in normalized_subjects):
+            raise MarketQueryError("stock.industry 的每个 subject 都必须指定股票名称或代码")
     if domain == "report" and operation == "compare" and len(sessions) < 2:
         raise MarketQueryError("report.compare 至少需要两个报告时段")
 
@@ -138,7 +151,7 @@ def normalize_query_spec(raw: Dict[str, Any]) -> Dict[str, Any]:
             "includeAdjacentChanges": bool(comparison.get("includeAdjacentChanges", domain == "sector")),
         },
         "options": {
-            "sourcePolicy": "local_only",
+            "sourcePolicy": "local_first" if domain == "stock" else "local_only",
             "includeSeries": bool(options.get("includeSeries", operation in {"timeline", "compare"})),
             "includeSummary": bool(options.get("includeSummary", True)),
             "sortMetric": str(options.get("sortMetric") or "changePercent"),

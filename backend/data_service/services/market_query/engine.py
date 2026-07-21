@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional
 
+from providers import longbridge
 from services.heatmap_snapshots import (
     MARKET_TIMEZONES,
     get_heatmap_snapshot,
+    latest_heatmap_snapshot,
     list_heatmap_snapshot_dates,
     list_heatmap_snapshot_history,
 )
@@ -399,6 +401,63 @@ def _sector_query(query: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _stock_query(query: Dict[str, Any]) -> Dict[str, Any]:
+    items = []
+    catalogs: Dict[str, Dict[str, Any]] = {}
+    for subject in query["subjects"]:
+        market = str(subject.get("market") or "").upper()
+        identifier = str(subject.get("id") or subject.get("name") or "")
+        requested_markets = [market] if market else list(MARKET_TIMEZONES)
+        for requested_market in requested_markets:
+            if requested_market not in catalogs:
+                catalogs[requested_market] = latest_heatmap_snapshot(requested_market)
+        result = longbridge.lookup_stock_industry(
+            market,
+            identifier,
+            str(subject.get("name") or ""),
+            catalogs or None,
+        )
+        error = str(result.get("error") or "")
+        if error == "not_found":
+            raise MarketQueryNotFound(f"没有找到股票“{identifier}”")
+        if error == "ambiguous":
+            candidates = [
+                f"{item.get('name')}（{item.get('code')}）"
+                for item in result.get("candidates") or []
+            ]
+            raise MarketQueryError(f"股票名称或代码存在歧义，请从以下候选中选择：{'、'.join(candidates)}")
+        if error == "industry_not_found":
+            stock = result.get("stock") or {}
+            raise MarketQueryNotFound(
+                f"已找到股票“{stock.get('name') or identifier}”，但长桥行业成分中没有匹配到其一级、二级行业"
+            )
+        items.append(result)
+    markets = list(dict.fromkeys(str(item.get("market") or "") for item in items))
+    return {
+        "resultType": "stock_industry",
+        "resolvedSubjects": [
+            {
+                "id": item.get("stock", {}).get("code"),
+                "name": item.get("stock", {}).get("name"),
+                "type": "stock",
+                "market": item.get("market"),
+            }
+            for item in items
+        ],
+        "data": {"items": items},
+        "meta": {
+            "source": "local.stock_industry_index+Longbridge",
+            "status": "complete",
+            "timezones": {
+                market: MARKET_TIMEZONES[market]
+                for market in markets
+                if market in MARKET_TIMEZONES
+            },
+            "warnings": [],
+        },
+    }
+
+
 def execute_market_query(raw_query: Dict[str, Any]) -> Dict[str, Any]:
     query = normalize_query_spec(raw_query)
     domain = query["intent"]["domain"]
@@ -406,6 +465,8 @@ def execute_market_query(raw_query: Dict[str, Any]) -> Dict[str, Any]:
         result = _report_query(query)
     elif domain == "weekly_index":
         result = _weekly_query(query)
-    else:
+    elif domain == "sector":
         result = _sector_query(query)
+    else:
+        result = _stock_query(query)
     return {"query": query, **result}
