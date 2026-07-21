@@ -108,6 +108,27 @@ class DashboardAccessTests(unittest.TestCase):
         self.assertEqual(remote.status_code, 200)
         self.assertNotIn("Access-Control-Allow-Origin", remote.headers)
 
+    @patch("app.generate_assistant_stream")
+    def test_assistant_stream_endpoint_returns_sse_events(self, mock_stream):
+        mock_stream.return_value = iter([
+            {"type": "status", "message": "正在生成回答…"},
+            {"type": "delta", "content": "你好"},
+            {"type": "done", "response": {"content": "你好", "label": "测试"}},
+        ])
+
+        response = self.client.post(
+            "/api/assistant/chat",
+            json={"message": "测试", "stream": True},
+            headers={"Host": "127.0.0.1:5001"},
+        )
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.content_type.startswith("text/event-stream"))
+        self.assertIn('"type": "delta"', body)
+        self.assertIn('"content": "你好"', body)
+        self.assertEqual(response.headers["X-Accel-Buffering"], "no")
+
     def test_changing_password_hash_invalidates_existing_session(self):
         login = self.client.post(
             "/api/access/login",

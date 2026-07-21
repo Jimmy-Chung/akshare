@@ -1,5 +1,7 @@
 import unittest
+from datetime import datetime
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from services.reports import (
     REPORT_SCHEMA_VERSION,
@@ -20,6 +22,8 @@ class ReportRankingTests(unittest.TestCase):
             ["globalOverview", "majorMarkets", "chartExports"],
         )
         for job in config["jobs"]:
+            self.assertFalse(job["enabled"])
+            self.assertIn("微应用", job["disabledReason"])
             workflow = " ".join(job["workflow"])
             self.assertIn("chartExports", workflow)
             self.assertIn("exportButtonId", workflow)
@@ -80,6 +84,21 @@ class ReportRankingTests(unittest.TestCase):
         kinds = [item["kind"] for item in report["chartExports"]]
         self.assertEqual(kinds.count("trend"), 10)
         self.assertEqual(kinds.count("heatmap"), 0)
+
+    @patch("services.reports._report_indices")
+    def test_recovered_report_records_historical_minute_precision(
+        self,
+        mock_report_indices,
+    ):
+        mock_report_indices.return_value = ([], {"CN": [], "HK": [], "US": []})
+        as_of = datetime(2026, 7, 20, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+        report = build_report("morning", as_of=as_of)
+
+        self.assertEqual(report["captureMode"], "historical-minute-recovery")
+        self.assertEqual(report["dataAsOf"], "2026-07-20T09:30:00+08:00")
+        self.assertIn("不是原采集秒级快照", report["recoveryNote"])
+        self.assertIn("历史 1 分钟线", report["sources"]["majorIndices"])
 
     def test_snapshot_lookup_returns_indices_only_public_report(self):
         report = {

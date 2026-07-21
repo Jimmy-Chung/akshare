@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from .common import compute_change_percent, safe_float, to_iso_time
 from .market_catalog import flattened_global_indices
@@ -400,6 +402,187 @@ def fetch_report_indices(markets: Optional[List[str]] = None) -> List[Dict[str, 
     )
 
 
+def _symbol_timezone(symbol: str) -> ZoneInfo:
+    if symbol.endswith(".US"):
+        return ZoneInfo("America/New_York")
+    if symbol.endswith(".HK"):
+        return ZoneInfo("Asia/Hong_Kong")
+    return ZoneInfo("Asia/Shanghai")
+
+
+def _exchange_trading_date(timestamp: datetime, symbol: str) -> date:
+    beijing_time = timestamp.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    return beijing_time.astimezone(_symbol_timezone(symbol)).date()
+
+
+def fetch_report_indices_at(
+    as_of: datetime,
+    markets: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Rebuild report indices from historical one-minute Longbridge candles."""
+    ctx = get_quote_context()
+    if not ctx or Period is None or AdjustType is None or TradeSessions is None:
+        return []
+
+    unique_items: Dict[str, Dict[str, str]] = {}
+    for item in [
+        *GLOBAL_INDEX_SYMBOLS,
+        *A_INDEX_SYMBOLS,
+        *HK_INDEX_SYMBOLS,
+        *US_INDEX_SYMBOLS,
+    ]:
+        unique_items.setdefault(item["code"], item)
+    market_symbols = {
+        "CN": A_INDEX_SYMBOLS,
+        "HK": HK_INDEX_SYMBOLS,
+        "US": US_INDEX_SYMBOLS,
+    }
+    intraday_codes = {
+        item["code"]
+        for market in (markets or market_symbols.keys())
+        for item in market_symbols.get(market, [])
+    }
+
+    symbols = [item["symbol"] for item in unique_items.values()]
+    try:
+        static_infos = ctx.static_info(symbols)
+    except Exception as exc:
+        logger.warning("Longbridge 历史快照静态信息获取失败: %s", exc)
+        static_infos = []
+    static_map = {info.symbol: info for info in static_infos}
+
+    result: List[Dict[str, Any]] = []
+    for item in unique_items.values():
+        symbol = item["symbol"]
+        beijing_as_of = as_of.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+        try:
+            candles = sorted(
+                ctx.history_candlesticks_by_offset(
+                    symbol,
+                    Period.Min_1,
+                    AdjustType.NoAdjust,
+                    False,
+                    500,
+                    beijing_as_of,
+                    TradeSessions.Intraday,
+                ),
+                key=lambda candle: candle.timestamp,
+            )
+        except Exception as exc:
+            logger.warning("Longbridge 历史分钟线%s获取失败: %s", item["code"], exc)
+            continue
+        candles = [candle for candle in candles if candle.timestamp <= beijing_as_of]
+        if not candles:
+            continue
+        latest = candles[-1]
+        trading_date = _exchange_trading_date(latest.timestamp, symbol)
+        session_candles = [
+            candle
+            for candle in candles
+            if _exchange_trading_date(candle.timestamp, symbol) == trading_date
+        ]
+        try:
+            daily_candles = sorted(
+                ctx.history_candlesticks_by_offset(
+                    symbol,
+                    Period.Day,
+                    AdjustType.NoAdjust,
+                    False,
+                    3,
+                    beijing_as_of,
+                    TradeSessions.Intraday,
+                ),
+                key=lambda candle: candle.timestamp,
+            )
+        except Exception as exc:
+            logger.warning("Longbridge 历史日线%s获取失败: %s", item["code"], exc)
+            daily_candles = []
+        daily_by_date = {
+            _exchange_trading_date(candle.timestamp, symbol): candle
+            for candle in daily_candles
+        }
+        prior_daily = [
+            candle
+            for candle in daily_candles
+            if _exchange_trading_date(candle.timestamp, symbol) < trading_date
+        ]
+        price = safe_float(latest.close, None)
+        previous_close = (
+            safe_float(prior_daily[-1].close, None) if prior_daily else None
+        )
+        if price is None:
+            continue
+        change_amount = price - previous_close if previous_close is not None else None
+        static_info = static_map.get(symbol)
+        market_value = None
+        if static_info:
+            circulating_shares = safe_float(
+                getattr(static_info, "circulating_shares", None), None
+            )
+            if circulating_shares:
+                market_value = circulating_shares * price
+        completed_daily = daily_by_date.get(trading_date)
+        open_value = safe_float(
+            completed_daily.open if completed_daily else session_candles[0].open,
+            None,
+        )
+        high_value = safe_float(completed_daily.high, None) if completed_daily else max(
+            value
+            for candle in session_candles
+            if (value := safe_float(candle.high, None)) is not None
+        )
+        low_value = safe_float(completed_daily.low, None) if completed_daily else min(
+            value
+            for candle in session_candles
+            if (value := safe_float(candle.low, None)) is not None
+        )
+        volume_value = (
+            safe_float(completed_daily.volume, 0)
+            if completed_daily
+            else sum(safe_float(candle.volume, 0) or 0 for candle in session_candles)
+        )
+        turnover_value = (
+            safe_float(completed_daily.turnover, 0)
+            if completed_daily
+            else sum(safe_float(candle.turnover, 0) or 0 for candle in session_candles)
+        )
+        result.append({
+            "name": _pick_name(symbol, static_map, item["name"]),
+            "code": item["code"],
+            "price": price,
+            "changePercent": (
+                compute_change_percent(price, change_amount)
+                if change_amount is not None
+                else None
+            ),
+            "changeAmount": change_amount,
+            "open": open_value,
+            "high": high_value,
+            "low": low_value,
+            "previousClose": previous_close,
+            "volume": volume_value,
+            "turnover": turnover_value,
+            "marketValue": market_value,
+            "intradayData": (
+                [
+                    {
+                        "time": to_iso_time(candle.timestamp),
+                        "value": safe_float(candle.close, None),
+                    }
+                    for candle in session_candles
+                    if safe_float(candle.close, None) is not None
+                ]
+                if item["code"] in intraday_codes
+                else []
+            ),
+            "tradeDate": to_iso_time(latest.timestamp),
+            "source": "Longbridge Historical 1m",
+            "isFallback": False,
+            "recovered": True,
+        })
+    return result
+
+
 def fetch_weekly_report_indices(
     start_date: date,
     end_date: date,
@@ -563,6 +746,12 @@ INDUSTRY_MEMBERS_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 INDUSTRY_SHARELIST_WORKERS = 4
 INDUSTRY_GROUP_WORKERS = 2
 INDUSTRY_ACTIVITY_WORKERS = 6
+STOCK_INDUSTRY_LOOKUP_WORKERS = 4
+STOCK_INDUSTRY_LOOKUP_BATCH_SIZE = 8
+STOCK_INDUSTRY_INDEX_DIR = Path(__file__).resolve().parents[3] / "tmp" / "stock-industry-index"
+STOCK_INDUSTRY_INDEX_LOCK = Lock()
+SECURITY_DIRECTORY_CACHE_TTL = 6 * 60 * 60
+SECURITY_DIRECTORY_CACHE: Dict[str, tuple[float, List[Dict[str, str]]]] = {}
 INDUSTRY_ACTIVITY_LIMIT = 24
 INDUSTRY_SHARELIST_MAX_IN_FLIGHT = 5
 INDUSTRY_SHARELIST_SEMAPHORE = BoundedSemaphore(INDUSTRY_SHARELIST_MAX_IN_FLIGHT)
@@ -683,6 +872,7 @@ def _cached_industry_members(market: str, counter_id: str) -> Dict[str, Any]:
 def _fetch_industry_turnovers(
     market: str,
     industries: List[Dict[str, Any]],
+    groups_by_name: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Optional[float]]:
     ctx = get_quote_context()
     if not ctx or not industries:
@@ -718,6 +908,17 @@ def _fetch_industry_turnovers(
             stock_by_symbol[symbol] = stock
             symbols.append(symbol)
         symbols_by_industry[code] = list(dict.fromkeys(symbols))
+
+    # Snapshot collection already has to load the largest industries' members
+    # to calculate turnover. Reuse those exact relationships to maintain the
+    # local stock -> level-1 -> level-2 index without adding another upstream
+    # request path.
+    _persist_stock_industry_memberships(
+        market,
+        industries,
+        members_by_code,
+        groups_by_name or {},
+    )
 
     turnover_by_symbol: Dict[str, float] = {}
     symbols = list(stock_by_symbol)
@@ -972,6 +1173,7 @@ def fetch_industry_heatmap(
         turnover_by_id = _fetch_industry_turnovers(
             normalized_market,
             activity_industries,
+            {str(item.get("name") or ""): item for item in groups},
         )
         for industry in industries:
             industry["turnover"] = turnover_by_id.get(str(industry.get("code") or ""))
@@ -1063,6 +1265,243 @@ def fetch_industry_detail(
             industry_meta,
         ),
     }
+
+
+def _canonical_stock_symbol(value: str) -> str:
+    normalized = "".join(str(value or "").upper().split())
+    if not normalized:
+        return ""
+    ticker, separator, suffix = normalized.partition(".")
+    if separator and ticker.isdigit() and suffix == "HK":
+        ticker = ticker.lstrip("0") or "0"
+    return f"{ticker}.{suffix}" if separator else ticker.lstrip("0") or ticker
+
+
+def _normalized_stock_name(value: str) -> str:
+    return "".join(str(value or "").lower().split())
+
+
+def _market_from_symbol(value: str) -> str:
+    suffix = str(value or "").upper().rsplit(".", 1)[-1]
+    if suffix in {"SH", "SZ"}:
+        return "CN"
+    if suffix in {"HK", "US"}:
+        return suffix
+    return ""
+
+
+def _security_directory(market: str) -> List[Dict[str, str]]:
+    normalized = market.upper()
+    cached = SECURITY_DIRECTORY_CACHE.get(normalized)
+    if cached and time.time() - cached[0] < SECURITY_DIRECTORY_CACHE_TTL:
+        return cached[1]
+    ctx = get_quote_context()
+    market_enum = getattr(Market, normalized, None) if Market is not None else None
+    if not ctx or market_enum is None:
+        return []
+    try:
+        rows = [
+            {
+                "code": str(getattr(item, "symbol", "") or ""),
+                "name": str(
+                    getattr(item, "name_cn", "")
+                    or getattr(item, "name_hk", "")
+                    or getattr(item, "name_en", "")
+                    or ""
+                ),
+                "nameCn": str(getattr(item, "name_cn", "") or ""),
+                "nameHk": str(getattr(item, "name_hk", "") or ""),
+                "nameEn": str(getattr(item, "name_en", "") or ""),
+            }
+            for item in ctx.security_list(market_enum)
+            if getattr(item, "symbol", "")
+        ]
+    except Exception as exc:
+        logger.warning("Longbridge %s 股票目录获取失败: %s", normalized, exc)
+        return []
+    SECURITY_DIRECTORY_CACHE[normalized] = (time.time(), rows)
+    return rows
+
+
+def _resolve_stock_security(market: str, identifier: str, name: str) -> Dict[str, Any]:
+    explicit_market = market.upper()
+    inferred_market = _market_from_symbol(identifier)
+    markets = [explicit_market or inferred_market] if explicit_market or inferred_market else ["CN", "HK", "US"]
+    code_needle = _canonical_stock_symbol(identifier)
+    name_needle = _normalized_stock_name(name or identifier)
+    matches: List[Dict[str, str]] = []
+    for candidate_market in markets:
+        for item in _security_directory(candidate_market):
+            code = str(item.get("code") or "")
+            code_match = bool(code_needle) and (
+                _canonical_stock_symbol(code) == code_needle
+                or (
+                    "." not in code_needle
+                    and _canonical_stock_symbol(code).split(".", 1)[0] == code_needle
+                )
+            )
+            names = [item.get("name"), item.get("nameCn"), item.get("nameHk"), item.get("nameEn")]
+            name_match = bool(name_needle) and any(
+                _normalized_stock_name(str(candidate or "")) == name_needle
+                for candidate in names
+            )
+            if code_match or name_match:
+                matches.append({**item, "market": candidate_market})
+    unique = {str(item["code"]): item for item in matches}
+    matches = list(unique.values())
+    if len(matches) == 1:
+        return matches[0]
+    return {
+        "error": "not_found" if not matches else "ambiguous",
+        "candidates": matches[:8],
+    }
+
+
+def _stock_index_path(market: str) -> Path:
+    return STOCK_INDUSTRY_INDEX_DIR / f"{market.upper()}.json"
+
+
+def _read_stock_industry_index(market: str) -> Dict[str, Any]:
+    path = _stock_index_path(market)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("stocks"), dict):
+            return payload
+    except (OSError, ValueError):
+        pass
+    return {"schemaVersion": 1, "market": market.upper(), "stocks": {}}
+
+
+def _write_stock_industry_index(market: str, payload: Dict[str, Any]) -> None:
+    path = _stock_index_path(market)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload["updatedAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _classification_record(
+    market: str,
+    stock: Dict[str, Any],
+    group: Dict[str, Any],
+    industry: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "stock": {
+            "code": _stock_symbol(stock),
+            "name": str(stock.get("name") or (stock.get("name_locales") or {}).get("zhCN") or ""),
+        },
+        "market": market,
+        "level1": {
+            "code": str(group.get("code") or ""),
+            "name": str(group.get("name") or industry.get("parentName") or ""),
+        },
+        "level2": {
+            "code": str(industry.get("code") or ""),
+            "name": str(industry.get("name") or ""),
+        },
+        "source": "Longbridge",
+        "classifiedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def _persist_stock_industry_memberships(
+    market: str,
+    industries: List[Dict[str, Any]],
+    members_by_code: Dict[str, Dict[str, Any]],
+    groups_by_name: Dict[str, Dict[str, Any]],
+) -> int:
+    records: Dict[str, Dict[str, Any]] = {}
+    industry_by_code = {
+        str(item.get("code") or ""): item
+        for item in industries
+        if item.get("code")
+    }
+    for code, members in members_by_code.items():
+        industry = industry_by_code.get(code)
+        if not industry:
+            continue
+        group = groups_by_name.get(str(industry.get("parentName") or ""), {})
+        for stock in members.get("stocks") or []:
+            symbol = _stock_symbol(stock)
+            if symbol:
+                records[_canonical_stock_symbol(symbol)] = _classification_record(
+                    market,
+                    stock,
+                    group,
+                    industry,
+                )
+    if not records:
+        return 0
+    with STOCK_INDUSTRY_INDEX_LOCK:
+        index = _read_stock_industry_index(market)
+        index.setdefault("stocks", {}).update(records)
+        _write_stock_industry_index(market, index)
+    return len(records)
+
+
+def lookup_stock_industry(
+    market: str,
+    identifier: str,
+    name: str = "",
+    catalog: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    security = _resolve_stock_security(market, identifier, name)
+    if security.get("error"):
+        return security
+    resolved_market = str(security.get("market") or market).upper()
+    symbol = str(security.get("code") or "")
+    canonical = _canonical_stock_symbol(symbol)
+
+    with STOCK_INDUSTRY_INDEX_LOCK:
+        index = _read_stock_industry_index(resolved_market)
+        cached = (index.get("stocks") or {}).get(canonical)
+    if cached:
+        return {**cached, "stock": {"code": symbol, "name": security.get("name") or cached["stock"].get("name")}, "cacheHit": True}
+
+    market_catalog = (
+        catalog.get(resolved_market)
+        if catalog and isinstance(catalog.get(resolved_market), dict)
+        else catalog
+    )
+    summary = market_catalog or fetch_industry_heatmap(resolved_market, include_stocks=False)
+    industries = sorted(
+        [item for item in summary.get("industries") or [] if item.get("code")],
+        key=lambda item: item.get("marketValue") or 0,
+        reverse=True,
+    )
+    groups = {str(item.get("name") or ""): item for item in summary.get("groups") or []}
+    for offset in range(0, len(industries), STOCK_INDUSTRY_LOOKUP_BATCH_SIZE):
+        batch = industries[offset:offset + STOCK_INDUSTRY_LOOKUP_BATCH_SIZE]
+        with ThreadPoolExecutor(max_workers=min(STOCK_INDUSTRY_LOOKUP_WORKERS, len(batch))) as executor:
+            members_list = list(executor.map(
+                lambda item: _cached_industry_members(resolved_market, str(item.get("code") or "")),
+                batch,
+            ))
+        found: Optional[Dict[str, Any]] = None
+        batch_records: Dict[str, Dict[str, Any]] = {}
+        for industry, members in zip(batch, members_list):
+            group = groups.get(str(industry.get("parentName") or ""), {})
+            for stock in members.get("stocks") or []:
+                stock_symbol = _stock_symbol(stock)
+                if not stock_symbol:
+                    continue
+                record = _classification_record(resolved_market, stock, group, industry)
+                batch_records[_canonical_stock_symbol(stock_symbol)] = record
+                if _canonical_stock_symbol(stock_symbol) == canonical:
+                    found = record
+        with STOCK_INDUSTRY_INDEX_LOCK:
+            index = _read_stock_industry_index(resolved_market)
+            index.setdefault("stocks", {}).update(batch_records)
+            _write_stock_industry_index(resolved_market, index)
+        if found:
+            return {
+                **found,
+                "stock": {"code": symbol, "name": security.get("name") or found["stock"].get("name")},
+                "cacheHit": False,
+            }
+    return {"error": "industry_not_found", "stock": {"code": symbol, "name": security.get("name") or ""}, "market": resolved_market}
 
 
 def fetch_market_calendar(market: str, start: date, end: date) -> Dict[str, Any]:

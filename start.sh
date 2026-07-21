@@ -12,6 +12,7 @@ BACKEND_SESSION="akshare-backend"
 FRONTEND_SESSION="akshare-frontend"
 HEATMAP_WATCHER_PREFIX="akshare-heatmap"
 REPORT_COLLECTOR_SESSION="akshare-report-collector"
+REPORT_AUTOMATION_DISABLED_FILE="$ROOT/backend/data_service/runtime_cache/report-automation.disabled"
 mkdir -p "$LOG_DIR"
 
 heatmap_watcher_pids() {
@@ -210,6 +211,9 @@ case "${1:-start}" in
     echo "本地:  http://localhost:3005"
     echo "后端:  http://localhost:5001"
     echo "采集:  CN/HK/US 热力图 watcher、四时段报告与周线采集器已随应用启动"
+    if [ -f "$REPORT_AUTOMATION_DISABLED_FILE" ]; then
+      echo "投递:  微应用（GPT Automation 已停用，不影响数据采集）"
+    fi
     echo "日志:  $LOG_DIR/"
     ;;
 
@@ -245,6 +249,9 @@ case "${1:-start}" in
     else
       echo "  ❌ 四时段报告与周线采集器"
       failures=$((failures + 1))
+    fi
+    if [ -f "$REPORT_AUTOMATION_DISABLED_FILE" ]; then
+      echo "  ⏸️  GPT 报告 Automation（微应用负责展示；采集器保持运行）"
     fi
     if [ -f "$LOG_DIR/frontend.log" ]; then
       echo ""

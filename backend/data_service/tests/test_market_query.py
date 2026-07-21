@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from providers import longbridge
 from services import heatmap_snapshots, weekly_reports
 from services.ai_assistant import (
     generate_assistant_response,
@@ -52,6 +53,21 @@ def sector_query(operation="timeline", *, name="酿酒业", market="CN", level=2
             "sortDirection": "desc",
             "limit": 5,
         },
+    }
+
+
+def stock_industry_query(*, name="贵州茅台", code="600519.SH", market="CN"):
+    return {
+        "schemaVersion": "1.0",
+        "intent": {"domain": "stock", "operation": "industry"},
+        "subjects": [{
+            "type": "stock",
+            "market": market,
+            "name": name,
+            "id": code,
+        }],
+        "time": {"kind": "latest"},
+        "options": {"sourcePolicy": "local_first"},
     }
 
 
@@ -123,6 +139,111 @@ class MarketQueryTests(unittest.TestCase):
         query["time"].update({"start": "2026-07-17", "end": "2026-07-15"})
         with self.assertRaisesRegex(MarketQueryError, "不能晚于"):
             normalize_query_spec(query)
+
+    def test_stock_industry_schema_uses_local_first_policy(self):
+        query = normalize_query_spec(stock_industry_query())
+
+        self.assertEqual(query["intent"], {"domain": "stock", "operation": "industry"})
+        self.assertEqual(query["subjects"][0]["type"], "stock")
+        self.assertEqual(query["options"]["sourcePolicy"], "local_first")
+
+    @patch("services.market_query.engine.longbridge.lookup_stock_industry")
+    def test_stock_industry_query_returns_two_level_classification(self, mock_lookup):
+        mock_lookup.return_value = {
+            "stock": {"code": "600519.SH", "name": "贵州茅台"},
+            "market": "CN",
+            "level1": {"code": "group-consumer", "name": "必选消费"},
+            "level2": {"code": "industry-wine", "name": "酿酒业"},
+            "source": "Longbridge",
+            "classifiedAt": "2026-07-18T02:00:00+08:00",
+            "cacheHit": False,
+        }
+
+        result = execute_market_query(stock_industry_query())
+
+        self.assertEqual(result["resultType"], "stock_industry")
+        item = result["data"]["items"][0]
+        self.assertEqual(item["level1"]["name"], "必选消费")
+        self.assertEqual(item["level2"]["name"], "酿酒业")
+        self.assertEqual(result["resolvedSubjects"][0]["id"], "600519.SH")
+
+    def test_natural_language_stock_industry_query_uses_stock_schema(self):
+        planned = stock_industry_query()
+        with patch(
+            "services.ai_assistant._provider_chat",
+            return_value=json.dumps(planned, ensure_ascii=False),
+        ):
+            query = plan_market_query({
+                "providerId": "custom",
+                "apiBase": "http://127.0.0.1:11434/v1",
+                "model": "test-model",
+            }, "贵州茅台属于哪个一级和二级行业？")
+
+        self.assertEqual(query["intent"], {"domain": "stock", "operation": "industry"})
+        self.assertEqual(query["subjects"][0]["id"], "600519.SH")
+        self.assertEqual(query["options"]["sourcePolicy"], "local_first")
+
+    def test_longbridge_stock_industry_lookup_persists_local_index(self):
+        catalog = {
+            "groups": [{"code": "group-consumer", "name": "必选消费"}],
+            "industries": [{
+                "code": "industry-wine",
+                "name": "酿酒业",
+                "parentName": "必选消费",
+                "marketValue": 100,
+            }],
+        }
+        members = {
+            "stocks": [{"code": "600519", "market": "SH", "name": "贵州茅台"}],
+        }
+        with (
+            TemporaryDirectory() as tmp,
+            patch.object(longbridge, "STOCK_INDUSTRY_INDEX_DIR", Path(tmp)),
+            patch.object(longbridge, "_resolve_stock_security", return_value={
+                "code": "600519.SH",
+                "name": "贵州茅台",
+                "market": "CN",
+            }),
+            patch.object(longbridge, "_cached_industry_members", return_value=members) as member_lookup,
+        ):
+            first = longbridge.lookup_stock_industry("CN", "600519.SH", "贵州茅台", catalog)
+            second = longbridge.lookup_stock_industry("CN", "600519.SH", "贵州茅台", catalog)
+
+        self.assertEqual(first["level1"]["name"], "必选消费")
+        self.assertEqual(first["level2"]["name"], "酿酒业")
+        self.assertFalse(first["cacheHit"])
+        self.assertTrue(second["cacheHit"])
+        self.assertEqual(member_lookup.call_count, 1)
+
+    def test_snapshot_memberships_incrementally_update_stock_industry_index(self):
+        industries = [{
+            "code": "industry-wine",
+            "name": "酿酒业",
+            "parentName": "必选消费",
+        }]
+        groups = {"必选消费": {"code": "group-consumer", "name": "必选消费"}}
+        members = {
+            "industry-wine": {
+                "stocks": [{"code": "600519", "market": "SH", "name": "贵州茅台"}],
+            },
+        }
+        with TemporaryDirectory() as tmp, patch.object(
+            longbridge,
+            "STOCK_INDUSTRY_INDEX_DIR",
+            Path(tmp),
+        ):
+            count = longbridge._persist_stock_industry_memberships(
+                "CN",
+                industries,
+                members,
+                groups,
+            )
+            payload = json.loads((Path(tmp) / "CN.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(count, 1)
+        record = payload["stocks"]["600519.SH"]
+        self.assertEqual(record["level1"], {"code": "group-consumer", "name": "必选消费"})
+        self.assertEqual(record["level2"], {"code": "industry-wine", "name": "酿酒业"})
 
     def test_weekly_collector_uses_latest_completed_market_week(self):
         timezone = ZoneInfo("Asia/Shanghai")
@@ -282,6 +403,62 @@ class MarketQueryTests(unittest.TestCase):
 
         self.assertEqual(query["time"]["kind"], "latest_finalized")
         self.assertEqual(query["time"]["date"], "")
+
+    def test_generic_weekly_report_drops_hallucinated_sector_subject(self):
+        planned = {
+            "schemaVersion": "1.0",
+            "intent": {"domain": "weekly_index", "operation": "get"},
+            "subjects": [{
+                "type": "sector",
+                "market": "CN",
+                "level": 2,
+                "name": "酿酒业",
+                "id": "",
+            }],
+            "time": {"kind": "latest_finalized"},
+        }
+        with patch(
+            "services.ai_assistant._provider_chat",
+            return_value=json.dumps(planned, ensure_ascii=False),
+        ):
+            query = plan_market_query({
+                "providerId": "custom",
+                "apiBase": "http://127.0.0.1:11434/v1",
+                "model": "test-model",
+            }, "那这一周的周报呢")
+
+        self.assertEqual(query["intent"], {"domain": "weekly_index", "operation": "get"})
+        self.assertEqual(query["subjects"], [])
+
+    def test_weekly_report_keeps_explicitly_named_index_subject(self):
+        planned = {
+            "schemaVersion": "1.0",
+            "intent": {"domain": "weekly_index", "operation": "get"},
+            "subjects": [{"type": "index", "name": "沪深300", "id": "000300.SH"}],
+            "time": {"kind": "latest_finalized"},
+        }
+        with patch(
+            "services.ai_assistant._provider_chat",
+            return_value=json.dumps(planned, ensure_ascii=False),
+        ):
+            query = plan_market_query({
+                "providerId": "custom",
+                "apiBase": "http://127.0.0.1:11434/v1",
+                "model": "test-model",
+            }, "沪深300这一周表现怎么样？")
+
+        self.assertEqual(query["subjects"][0]["name"], "沪深300")
+
+    def test_weekly_schema_rejects_sector_subject(self):
+        query = {
+            "schemaVersion": "1.0",
+            "intent": {"domain": "weekly_index", "operation": "get"},
+            "subjects": [{"type": "sector", "market": "CN", "name": "酿酒业"}],
+            "time": {"kind": "latest_finalized"},
+        }
+
+        with self.assertRaisesRegex(MarketQueryError, "只能使用 index"):
+            normalize_query_spec(query)
 
     def test_provider_planning_and_direct_query_are_one_to_one(self):
         planned = sector_query()

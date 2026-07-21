@@ -135,18 +135,34 @@ curl -H "Authorization: Bearer $CODEX_REPORT_API_TOKEN" \
   "https://market.example.com/api/codex/reports/latest?session=close"
 ```
 
-Codex 可先读取任务配置，再据此创建或同步 Automation：
+Codex 可读取任务配置了解历史任务定义，但四个 GPT Automation 当前保持停用：
 
 ```bash
 curl -H "Authorization: Bearer $CODEX_REPORT_API_TOKEN" \
   "https://market.example.com/api/codex/reports/config"
 ```
 
-配置会声明每个任务的北京时间、工作日、市场范围、生成/读取接口、鉴权变量和输出板块。
-配置修改后，需要再次让 Codex 执行 Automation 同步。
+配置会声明每个任务的北京时间、工作日、市场范围、生成/读取接口、鉴权变量和输出板块，
+同时返回 `enabled: false`。日报与夜报由微应用读取本地固化数据包并展示；GPT Automation
+不再负责生成或投递。Automation 的停用不会停止独立的四时段报告采集器。
 
 四个 `session` 值依次为 `morning`、`midday`、`close`、`us-night`。云端定时任务可在
 Asia/Shanghai 时区的 09:30、12:30、16:30、22:30 调用对应的受保护生成接口。
+
+## AI 助手 Benchmark
+
+分段测量查询规划、Provider 答案生成、本地查询和总耗时：
+
+```bash
+/Users/enjoychan/.venvs/akshare/bin/python tools/benchmark_ai_assistant.py \
+  --scenario stock \
+  --runs 3 \
+  --output tmp/benchmarks/ai-assistant-stock.json
+```
+
+内置场景包括 `stock`、`sector`、`weekly` 和 `quick-midday`。Benchmark 使用当前本机
+Provider 配置并产生真实模型请求，但不会打印 API Key 或完整 Prompt。输出包含各阶段的
+`minMs`、`meanMs`、`p50Ms`、`p95Ms`、`maxMs`，以及每次请求的输入、输出字符数。
 
 ## 诊断
 

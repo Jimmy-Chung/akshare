@@ -112,7 +112,8 @@ def report_automation_config(api_base_url: str) -> Dict[str, Any]:
         jobs.append({
             "id": f"market-report-{session}",
             "name": item["label"],
-            "enabled": True,
+            "enabled": False,
+            "disabledReason": "报告由微应用展示，GPT Automation 不再负责生成或投递",
             "schedule": {
                 "timezone": "Asia/Shanghai",
                 "localTime": item["time"],
@@ -222,12 +223,18 @@ def _public_report(report: Dict[str, Any]) -> Dict[str, Any]:
 
 def _report_indices(
     markets: List[str],
+    as_of: Optional[datetime] = None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]]]:
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        longbridge_future = executor.submit(longbridge.fetch_report_indices, markets)
-        fallback_future = executor.submit(legacy_market.fetch_global_indices)
-        longbridge_rows = longbridge_future.result()
-        fallback_rows = fallback_future.result()
+    if as_of is not None:
+        longbridge_rows = longbridge.fetch_report_indices_at(as_of, markets)
+        # Live fallback quotes cannot be used for a historical recovery.
+        fallback_rows: List[Dict[str, Any]] = []
+    else:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            longbridge_future = executor.submit(longbridge.fetch_report_indices, markets)
+            fallback_future = executor.submit(legacy_market.fetch_global_indices)
+            longbridge_rows = longbridge_future.result()
+            fallback_rows = fallback_future.result()
 
     global_rows = merge_preferred_rows(
         [item for item in longbridge_rows if item.get("code") in GLOBAL_INDEX_ORDER],
@@ -331,21 +338,31 @@ def _chart_exports(
     return result
 
 
-def build_report(session: str, _news_digest: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+def build_report(
+    session: str,
+    _news_digest: Optional[List[Dict[str, Any]]] = None,
+    *,
+    as_of: Optional[datetime] = None,
+) -> Dict[str, Any]:
     if session not in SESSION_TIMES:
         session = latest_session()
     markets = SESSION_MARKETS[session]
-    global_rows, major_rows = _report_indices(markets)
+    global_rows, major_rows = _report_indices(markets, as_of)
     now = datetime.now(REPORT_TIMEZONE)
     generated_at = now.isoformat()
-    snapshot_id = f"{session}-{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
-    return {
+    report_date = (as_of or now).astimezone(REPORT_TIMEZONE).date()
+    mode = "recovery" if as_of is not None else "scheduled"
+    snapshot_id = (
+        f"{session}-{mode}-{report_date.strftime('%Y%m%d')}-"
+        f"{now.strftime('%H%M%S')}-{uuid4().hex[:8]}"
+    )
+    report = {
         "schemaVersion": REPORT_SCHEMA_VERSION,
         "session": session,
         "snapshotId": snapshot_id,
         "label": SESSION_LABELS[session],
         "scheduledAt": SESSION_TIMES[session].strftime("%H:%M"),
-        "date": now.date().isoformat(),
+        "date": report_date.isoformat(),
         "generatedAt": generated_at,
         "markets": markets,
         "marketLabels": [MARKET_LABELS[item] for item in markets],
@@ -354,11 +371,27 @@ def build_report(session: str, _news_digest: Optional[List[Dict[str, Any]]] = No
         "sectorRankings": [],
         "chartExports": _chart_exports(session, markets, snapshot_id),
         "sources": {
-            "globalIndices": "Longbridge 优先，缺失项使用备用公开行情",
-            "majorIndices": "Longbridge 优先，缺失项使用备用公开行情",
+            "globalIndices": (
+                "Longbridge 历史 1 分钟线（恢复采集）"
+                if as_of is not None
+                else "Longbridge 优先，缺失项使用备用公开行情"
+            ),
+            "majorIndices": (
+                "Longbridge 历史 1 分钟线（恢复采集）"
+                if as_of is not None
+                else "Longbridge 优先，缺失项使用备用公开行情"
+            ),
             "sectorRankings": "未采集（报告已与热点图解耦）",
         },
     }
+    if as_of is not None:
+        report["captureMode"] = "historical-minute-recovery"
+        report["dataAsOf"] = as_of.astimezone(REPORT_TIMEZONE).isoformat()
+        report["recoveryNote"] = (
+            "原定时快照缺失；使用 Longbridge 历史 1 分钟线恢复，"
+            "代表目标分钟结束时状态，不是原采集秒级快照"
+        )
+    return report
 
 
 def _is_current_schema(report: Any) -> bool:
@@ -508,6 +541,28 @@ def regenerate_report(
     report = build_report(session_name, news_digest)
     cached_day = cache.get(day_key, {})
     cached_day[session_name] = report
+    cache[day_key] = cached_day
+    _write_cache(cache)
+    return _public_report(report)
+
+
+def recover_report(session: str, target_date: date) -> Dict[str, Any]:
+    """Persist a missing fixed-session package from historical minute bars."""
+    if session not in SESSION_TIMES:
+        raise ValueError(f"unsupported report session: {session}")
+    as_of = datetime.combine(target_date, SESSION_TIMES[session], REPORT_TIMEZONE)
+    if as_of > datetime.now(REPORT_TIMEZONE):
+        raise ValueError("cannot recover a report before its scheduled time")
+    cache = _read_cache()
+    day_key = target_date.isoformat()
+    cached_day = cache.get(day_key, {})
+    existing = cached_day.get(session)
+    if _is_indices_compatible(existing):
+        return _public_report(existing)
+    report = build_report(session, as_of=as_of)
+    if not any(group.get("indices") for group in report.get("majorMarkets") or []):
+        raise RuntimeError("historical minute data is unavailable for this report")
+    cached_day[session] = report
     cache[day_key] = cached_day
     _write_cache(cache)
     return _public_report(report)

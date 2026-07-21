@@ -4,7 +4,7 @@ import json
 import os
 import re
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -276,6 +276,9 @@ def _compact_report(report: Dict[str, Any], public_app_url: str) -> Dict[str, An
         "date": report.get("date"),
         "label": report.get("label"),
         "generatedAt": report.get("generatedAt"),
+        "dataAsOf": report.get("dataAsOf") or report.get("generatedAt"),
+        "captureMode": report.get("captureMode") or "scheduled",
+        "recoveryNote": report.get("recoveryNote") or "",
         "markets": report.get("marketLabels") or [],
         "globalOverview": [
             {
@@ -376,6 +379,57 @@ def _provider_chat(
     return content
 
 
+def _provider_chat_stream(
+    config: Dict[str, str],
+    messages: List[Dict[str, str]],
+    *,
+    temperature: float = 0.1,
+) -> Iterator[str]:
+    """Yield text deltas from an OpenAI-compatible SSE chat completion."""
+    headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+    if config["apiKey"]:
+        headers["Authorization"] = f"Bearer {config['apiKey']}"
+    received_content = False
+    try:
+        with requests.post(
+            _chat_url(config["apiBase"]),
+            headers=headers,
+            json={
+                "model": config["model"],
+                "messages": messages,
+                "temperature": temperature,
+                "stream": True,
+            },
+            timeout=90,
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line or not raw_line.startswith("data:"):
+                    continue
+                event_data = raw_line[5:].strip()
+                if event_data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(event_data)
+                    delta = ((event.get("choices") or [{}])[0].get("delta") or {})
+                    content = str(delta.get("content") or "")
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if content:
+                    received_content = True
+                    yield content
+    except requests.RequestException as exc:
+        upstream_response = getattr(exc, "response", None)
+        status = getattr(upstream_response, "status_code", None)
+        detail = _provider_error_detail(upstream_response)
+        detail_suffix = f"：{detail}" if detail else ""
+        suffix = f"（HTTP {status}{detail_suffix}）" if status else ""
+        raise AssistantProviderError(f"Provider 流式请求失败{suffix}") from exc
+    if not received_content:
+        raise AssistantProviderError("Provider 没有返回流式内容")
+
+
 def _json_from_provider(content: str) -> Dict[str, Any]:
     candidate = content.strip()
     if candidate.startswith("```"):
@@ -404,22 +458,26 @@ def _query_planner_messages(message: str) -> List[Dict[str, str]]:
     system_prompt = f"""你是本地金融数据查询规划器。今天是 {today}，默认时区为 Asia/Shanghai。
 你的唯一任务是把用户输入转换成 QuerySpec 1.0 JSON；不得回答行情、不得补数、不得输出 Markdown。
 
-intent.domain 只支持：report、weekly_index、sector。
+intent.domain 只支持：report、weekly_index、sector、stock。
 operation：
 - report: get、compare
 - weekly_index: get、compare、rank
 - sector: snapshot、timeline、compare、rank、children
+- stock: industry
 
 报告 session 只支持 morning、midday、close、us-night。早报=morning，午报=midday，收盘报=close，夜报/晚报=us-night。
 市场只支持 CN、HK、US；A股=CN，港股=HK，美股=US。板块 level 只支持 1 或 2。
 历史查询 sourcePolicy 必须为 local_only。板块日期使用 market_local。
 “本周/最近一周/最新一周/最新一份周报”使用 weekly_index，并把 time.kind 设为 latest_finalized、date/start/end 留空；后端会选择最近一份已经完成的周报。
+用户要整份周报且没有明确点名指数时，subjects 必须是 []；绝不得把板块、股票或示例中的 subject 带入 weekly_index。
 用户说“变化/走势”时使用 sector.timeline、comparison.mode=first_to_last、includeAdjacentChanges=true。
 用户说“最强/最高/前几名”时使用 rank，并设置 sortMetric、sortDirection 和 limit。
 不知道板块 code 时保留 id 为空并填写 name；不要虚构 code。
+用户询问某只股票“属于什么行业/一级板块/二级板块”时使用 stock.industry，subject.type=stock；股票代码填写 id，股票名称填写 name。不要根据常识填写行业名称，行业归属由后端查询。
 
 输出结构：
 {{"schemaVersion":"1.0","intent":{{"domain":"sector","operation":"timeline"}},"subjects":[{{"type":"sector","market":"CN","level":2,"name":"酿酒业","id":""}}],"time":{{"kind":"date","date":"2026-07-15","start":"","end":"","timezonePolicy":"market_local"}},"report":{{"session":"","sessions":[]}},"metrics":["changePercent","marketValue","turnover"],"comparison":{{"mode":"first_to_last","includeAdjacentChanges":true}},"options":{{"sourcePolicy":"local_only","includeSeries":true,"includeSummary":true,"sortMetric":"changePercent","sortDirection":"desc","limit":20}}}}
+周报示例：“那这一周的周报呢”的 intent 为 weekly_index.get、subjects 为 []、time.kind 为 latest_finalized。
 只输出一个 JSON 对象。"""
     return [
         {"role": "system", "content": system_prompt},
@@ -432,7 +490,7 @@ def plan_market_query(payload: Dict[str, Any], message: str) -> Dict[str, Any]:
     messages = _query_planner_messages(message)
     content = _provider_chat(config, messages, temperature=0)
     try:
-        query = normalize_query_spec(_json_from_provider(content))
+        query = normalize_query_spec(_sanitize_planned_query(_json_from_provider(content), message))
     except RuntimeError as exc:
         repair_messages = [
             *messages,
@@ -444,7 +502,7 @@ def plan_market_query(payload: Dict[str, Any], message: str) -> Dict[str, Any]:
         ]
         repaired = _provider_chat(config, repair_messages, temperature=0)
         try:
-            query = normalize_query_spec(_json_from_provider(repaired))
+            query = normalize_query_spec(_sanitize_planned_query(_json_from_provider(repaired), message))
         except RuntimeError as repaired_exc:
             raise AssistantProviderError(f"查询 Schema 校验失败：{repaired_exc}") from repaired_exc
     if query["intent"]["domain"] == "weekly_index" and any(
@@ -460,6 +518,31 @@ def plan_market_query(payload: Dict[str, Any], message: str) -> Dict[str, Any]:
     return query
 
 
+def _sanitize_planned_query(raw_query: Dict[str, Any], message: str) -> Dict[str, Any]:
+    """Remove planner-hallucinated weekly filters before schema validation."""
+    intent = raw_query.get("intent") or {}
+    if not isinstance(intent, dict) or intent.get("domain") != "weekly_index":
+        return raw_query
+    subjects = raw_query.get("subjects") or []
+    if not isinstance(subjects, list):
+        return raw_query
+    normalized_message = "".join(message.lower().split())
+    raw_query["subjects"] = [
+        subject
+        for subject in subjects
+        if isinstance(subject, dict)
+        and str(subject.get("type") or "index") == "index"
+        and any(
+            token and "".join(token.lower().split()) in normalized_message
+            for token in (
+                str(subject.get("name") or ""),
+                str(subject.get("id") or subject.get("code") or ""),
+            )
+        )
+    ]
+    return raw_query
+
+
 def _query_periods(result: Dict[str, Any]) -> List[str]:
     result_type = str(result.get("resultType") or "")
     data = result.get("data") or {}
@@ -468,32 +551,47 @@ def _query_periods(result: Dict[str, Any]) -> List[str]:
     if result_type == "weekly_index":
         period = data.get("period") or {}
         return [f"{period.get('startDate')} 至 {period.get('endDate')}"]
+    if result_type == "stock_industry":
+        return ["当前行业分类"]
     return [str(data.get("date") or "")]
 
 
-def generate_market_query_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _market_query_answer_request(
+    payload: Dict[str, Any],
+) -> Tuple[Dict[str, str], Dict[str, Any], Dict[str, Any], List[Dict[str, str]]]:
     message = str(payload.get("message") or "").strip()
     if not message:
         raise AssistantConfigurationError("请输入查询内容")
     config = _provider_config(payload)
     query = plan_market_query(payload, message)
     result = execute_market_query(query)
+    return config, query, result, _market_query_answer_messages(message, result)
+
+
+def _market_query_answer_messages(
+    message: str,
+    result: Dict[str, Any],
+) -> List[Dict[str, str]]:
     answer_prompt = (
         "你是金融数据结果解释器。只能使用 ResultEnvelope 中的数据，不得联网补数或猜测。"
         "null 表示没有覆盖，绝不能写成 0。所有派生数值已经由后端计算，不要重新计算。"
         "优先直接回答用户问题；如果 meta.warnings、coverage 或 status 显示不完整，必须说明。"
-        "输出简体中文 Markdown，并说明数据日期、市场当地时区和本地数据来源。\n\n"
+        "输出简体中文 Markdown；说明 ResultEnvelope 明确提供的数据日期、市场当地时区和本地数据来源，未提供的信息不要猜测。\n\n"
         f"用户问题：{message}\n\n"
         f"ResultEnvelope：{json.dumps(result, ensure_ascii=False, separators=(',', ':'))}"
     )
-    content = _provider_chat(
-        config,
-        [
-            {"role": "system", "content": "你只解释给定的本地结构化金融查询结果。"},
-            {"role": "user", "content": answer_prompt},
-        ],
-        temperature=0.1,
-    )
+    return [
+        {"role": "system", "content": "你只解释给定的本地结构化金融查询结果。"},
+        {"role": "user", "content": answer_prompt},
+    ]
+
+
+def _market_query_response(
+    config: Dict[str, str],
+    query: Dict[str, Any],
+    result: Dict[str, Any],
+    content: str,
+) -> Dict[str, Any]:
     fallback_notice = str((result.get("meta") or {}).get("fallbackNotice") or "")
     if fallback_notice:
         content = f"> {fallback_notice}\n\n{content}"
@@ -507,6 +605,7 @@ def generate_market_query_response(payload: Dict[str, Any]) -> Dict[str, Any]:
             "report": "历史报告查询",
             "weekly_index": "周线查询",
             "sector": "板块查询",
+            "stock": "股票行业查询",
         }[query["intent"]["domain"]],
         "provider": config["name"],
         "model": config["model"],
@@ -517,13 +616,67 @@ def generate_market_query_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def generate_market_query_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    config, query, result, messages = _market_query_answer_request(payload)
+    content = _provider_chat(config, messages, temperature=0.1)
+    return _market_query_response(config, query, result, content)
+
+
 def generate_assistant_response(payload: Dict[str, Any], public_app_url: str) -> Dict[str, Any]:
     if bool(payload.get("quickAction")):
         return generate_market_report(payload, public_app_url)
     return generate_market_query_response(payload)
 
 
-def generate_market_report(payload: Dict[str, Any], public_app_url: str) -> Dict[str, Any]:
+def generate_assistant_stream(
+    payload: Dict[str, Any],
+    public_app_url: str,
+) -> Iterator[Dict[str, Any]]:
+    """Yield status, text deltas and a final response envelope for the chat UI."""
+    if bool(payload.get("quickAction")):
+        yield {"type": "status", "message": "正在读取已固化的报告数据…"}
+        config, messages, response, fallback_notice = _market_report_request(
+            payload,
+            public_app_url,
+        )
+        yield {"type": "status", "message": "正在生成报告…"}
+        chunks: List[str] = []
+        if fallback_notice:
+            chunks.append(f"> {fallback_notice}\n\n")
+            yield {"type": "delta", "content": chunks[-1]}
+        for chunk in _provider_chat_stream(config, messages, temperature=0.2):
+            chunks.append(chunk)
+            yield {"type": "delta", "content": chunk}
+        yield {"type": "done", "response": {**response, "content": "".join(chunks)}}
+        return
+
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        raise AssistantConfigurationError("请输入查询内容")
+    config = _provider_config(payload)
+    yield {"type": "status", "message": "正在理解你的问题…"}
+    query = plan_market_query(payload, message)
+    yield {"type": "status", "message": "正在查询本地数据…"}
+    result = execute_market_query(query)
+    messages = _market_query_answer_messages(message, result)
+    yield {"type": "status", "message": "正在生成回答…"}
+    chunks = []
+    fallback_notice = str((result.get("meta") or {}).get("fallbackNotice") or "")
+    if fallback_notice:
+        yield {"type": "delta", "content": f"> {fallback_notice}\n\n"}
+    for chunk in _provider_chat_stream(config, messages, temperature=0.1):
+        chunks.append(chunk)
+        yield {"type": "delta", "content": chunk}
+    yield {
+        "type": "done",
+        "response": _market_query_response(config, query, result, "".join(chunks)),
+    }
+
+
+def _market_report_request(
+    payload: Dict[str, Any],
+    public_app_url: str,
+) -> Tuple[Dict[str, str], List[Dict[str, str]], Dict[str, Any], str]:
     message = str(payload.get("message") or "").strip()
     if not message:
         raise AssistantConfigurationError("请输入“日报”、“周报”或具体报告要求")
@@ -580,24 +733,12 @@ def generate_market_report(payload: Dict[str, Any], public_app_url: str) -> Dict
         f"{'结构化券商周线' if report_type == 'weekly' else '结构化指数快照'}如下：\n"
         f"{json.dumps(reports, ensure_ascii=False, separators=(',', ':'))}"
     )
-    content = _provider_chat(
-        config,
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.2,
-    )
-    if weekly_fallback_notice:
-        content = f"> {weekly_fallback_notice}\n\n{content}"
-
     data_periods = (
         [f"{weekly_period['startDate']} 至 {weekly_period['endDate']}"]
         if report_type == "weekly"
         else list(dict.fromkeys(str(item.get("date") or "") for item in reports))
     )
-    result = {
-        "content": content,
+    response = {
         "reportType": report_type,
         "session": report_session if report_type == "daily" else "weekly",
         "label": SESSION_LABELS[report_session] if report_type == "daily" else "周报",
@@ -612,7 +753,18 @@ def generate_market_report(payload: Dict[str, Any], public_app_url: str) -> Dict
         ),
     }
     if report_type == "weekly":
-        result["period"] = weekly_period
-        result["coverage"] = weekly_context.get("coverage") or {}
-        result["fallbackNotice"] = weekly_fallback_notice
-    return result
+        response["period"] = weekly_period
+        response["coverage"] = weekly_context.get("coverage") or {}
+        response["fallbackNotice"] = weekly_fallback_notice
+    return config, [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ], response, weekly_fallback_notice
+
+
+def generate_market_report(payload: Dict[str, Any], public_app_url: str) -> Dict[str, Any]:
+    config, messages, response, fallback_notice = _market_report_request(payload, public_app_url)
+    content = _provider_chat(config, messages, temperature=0.2)
+    if fallback_notice:
+        content = f"> {fallback_notice}\n\n{content}"
+    return {**response, "content": content}
